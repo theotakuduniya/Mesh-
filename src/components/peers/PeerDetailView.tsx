@@ -267,6 +267,7 @@ export const PeerDetailView: React.FC = () => {
     if (!peer || isBoosting) return;
     setIsBoosting(true);
     await connectDirectWebRTC(peer.id);
+    await new Promise((resolve) => setTimeout(resolve, 500));
     const rtt = await pingPeer(peer.id);
     if (rtt) {
       setLiveLatency(rtt);

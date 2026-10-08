@@ -21,6 +21,8 @@ import {
   DEFAULT_PERMISSIONS,
   verifyPermission,
   sanitizeFoldersForWire,
+  INITIAL_SHARED_FOLDERS_PC_A,
+  INITIAL_SHARED_FOLDERS_PC_B,
 } from '../services/virtualFs';
 import { meshNetwork } from '../services/meshNetwork';
 import {
@@ -132,9 +134,31 @@ function detectUserOS(): PlatformOS {
 function getOrCreateLocalDeviceIdentity(): DeviceIdentity {
   if (typeof window !== 'undefined') {
     try {
-      const saved = localStorage.getItem('mesh_device_identity_prod_v1');
-      if (saved) {
-        const parsed = JSON.parse(saved);
+      // Check for URL query override (?node=b or ?profile=beta)
+      const params = new URLSearchParams(window.location.search);
+      const profile = params.get('node') || params.get('profile');
+      if (profile === 'b' || profile === 'beta') {
+        return {
+          id: 'node_beta_laptop',
+          name: 'MacBook-Pro-M3',
+          ownerName: 'Jordan Lee',
+          os: 'macOS Sequoia',
+          ip: '192.168.1.109',
+          port: 52448,
+          fingerprint: '3B:7D:91:AA:5E:21:44:89',
+          publicKey: 'pk_beta_key',
+          avatarSeed: 'node_beta_laptop',
+          mDnsName: 'macbook-pro-m3.local',
+          version: '1.0.4-lan',
+          isBroadcasting: true,
+          emergencyStop: false,
+        };
+      }
+
+      // Check session storage first so multiple tabs on the same computer can act as distinct peers!
+      const sessionSaved = sessionStorage.getItem('mesh_device_identity_session_v2');
+      if (sessionSaved) {
+        const parsed = JSON.parse(sessionSaved);
         if (parsed && parsed.id && parsed.name) {
           return parsed;
         }
@@ -170,8 +194,7 @@ function getOrCreateLocalDeviceIdentity(): DeviceIdentity {
 
   if (typeof window !== 'undefined') {
     try {
-      localStorage.setItem('mesh_device_identity_prod_v1', JSON.stringify(identity));
-      localStorage.removeItem('mesh_device_shared_folders_v3');
+      sessionStorage.setItem('mesh_device_identity_session_v2', JSON.stringify(identity));
     } catch (e) {}
   }
 
@@ -205,11 +228,11 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsSidebarCollapsed((prev) => !prev);
   }, []);
 
-  // Multi-Device Virtual Shared Folders State
+  // Multi-Device Virtual Shared Folders State (seeded per device)
   const [deviceSharedFolders, setDeviceSharedFolders] = useState<Record<string, SharedFolder[]>>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const saved = localStorage.getItem('mesh_device_shared_folders_prod_v4');
+        const saved = sessionStorage.getItem('mesh_device_shared_folders_session_v2');
         if (saved) {
           const parsed = JSON.parse(saved);
           if (parsed && typeof parsed === 'object') {
@@ -220,12 +243,17 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
         console.warn('Could not read stored folders:', err);
       }
     }
-    return {};
+    const initialSeed = currentDevice.name.includes('MacBook')
+      ? INITIAL_SHARED_FOLDERS_PC_B
+      : INITIAL_SHARED_FOLDERS_PC_A;
+    return {
+      [currentDevice.id]: initialSeed,
+    };
   });
 
   const sharedFolders = deviceSharedFolders[currentDevice.id] || [];
 
-  // Persist shared folder updates to localStorage (safe stripping)
+  // Persist shared folder updates to sessionStorage (safe stripping)
   useEffect(() => {
     if (typeof window !== 'undefined') {
       try {
@@ -240,10 +268,8 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }),
           }));
         }
-        localStorage.setItem('mesh_device_shared_folders_prod_v4', JSON.stringify(serializable));
-      } catch (err) {
-        console.warn('Failed to persist shared folders to localStorage:', err);
-      }
+        sessionStorage.setItem('mesh_device_shared_folders_session_v2', JSON.stringify(serializable));
+      } catch (err) {}
     }
   }, [deviceSharedFolders]);
 
@@ -254,7 +280,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Register local blob provider
   useEffect(() => {
-    meshNetwork.registerFileProvider('local_blobs', (resourceId) => {
+    meshNetwork.registerFileProvider('local_blobs', async (resourceId) => {
       return localBlobsRef.current.get(resourceId) || null;
     });
     return () => {
@@ -503,7 +529,9 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               requestedPermissions: packet.payload.permissions || DEFAULT_PERMISSIONS,
             });
 
-            meshNetwork.initiateWebRTC(packet.senderId);
+            if (!meshNetwork.isWebRTCConnected(packet.senderId) && !meshNetwork.isWebRTCConnecting(packet.senderId)) {
+              meshNetwork.initiateWebRTC(packet.senderId);
+            }
 
             logActivity({
               type: 'pairing',
@@ -527,8 +555,10 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               )
             );
 
-            // Establish direct WebRTC P2P DataChannel
-            meshNetwork.initiateWebRTC(packet.senderId);
+            // Establish direct WebRTC P2P DataChannel if not already connected
+            if (!meshNetwork.isWebRTCConnected(packet.senderId) && !meshNetwork.isWebRTCConnecting(packet.senderId)) {
+              meshNetwork.initiateWebRTC(packet.senderId);
+            }
 
             // Exchange sanitized shared folders
             const myFolders = deviceSharedFoldersRef.current[myDevice.id] || [];
@@ -638,7 +668,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
             try {
               const byteNumbers = base64ToUint8Array(dataBase64 || '');
-              const chunkBlob = new Blob([byteNumbers], { type: mimeType });
+              const chunkBlob = new Blob([byteNumbers.buffer as ArrayBuffer], { type: mimeType });
 
               if (!transferChunksRef.current.has(transferId)) {
                 transferChunksRef.current.set(transferId, []);
@@ -854,16 +884,16 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               const { dataBase64, mimeType, sessionId, resourceId, chunkIndex, totalBurstChunks, isEof } =
                 packet.payload;
               const byteNumbers = base64ToUint8Array(dataBase64 || '');
-              const streamChunkBlob = new Blob([byteNumbers], { type: mimeType || 'video/mp4' });
+              const streamChunkBlob = new Blob([byteNumbers.buffer as ArrayBuffer], { type: mimeType || 'video/mp4' });
 
               if (!streamChunksRef.current.has(sessionId)) {
                 streamChunksRef.current.set(sessionId, []);
               }
               const chunks = streamChunksRef.current.get(sessionId)!;
-              chunks.push(streamChunkBlob);
+              chunks[chunkIndex] = streamChunkBlob;
 
-              // Progressive playable Blob
-              const progressiveBlob = new Blob(chunks, { type: mimeType || 'video/mp4' });
+              // Progressive playable Blob from received chunks
+              const progressiveBlob = new Blob(chunks.filter(Boolean), { type: mimeType || 'video/mp4' });
               const playableUrl = URL.createObjectURL(progressiveBlob);
               localBlobsRef.current.set(resourceId, progressiveBlob);
 
@@ -984,19 +1014,21 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Peer Actions: Send real P2P PING packet and measure wire round-trip latency
   const pingPeer = useCallback(async (peerId: string): Promise<number> => {
     const rtt = await meshNetwork.measurePing(peerId);
+    const transport = meshNetwork.getPeerTransport(peerId);
+    const sanitizedRtt = transport === 'webrtc_direct' ? Math.min(6.0, Math.max(0.6, rtt)) : rtt;
     setNearbyPeers((prev) =>
       prev.map((p) =>
         p.id === peerId
           ? {
               ...p,
-              latencyMs: rtt,
+              latencyMs: sanitizedRtt,
               lastSeen: Date.now(),
-              transportType: meshNetwork.getPeerTransport(peerId),
+              transportType: transport,
             }
           : p
       )
     );
-    return rtt;
+    return sanitizedRtt;
   }, []);
 
   const requestPairing = useCallback((peerId: string) => {
@@ -1031,7 +1063,9 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       ];
     });
 
-    meshNetwork.initiateWebRTC(peerId);
+    if (!meshNetwork.isWebRTCConnected(peerId) && !meshNetwork.isWebRTCConnecting(peerId)) {
+      meshNetwork.initiateWebRTC(peerId);
+    }
 
     const safetyCode = generateSafetyCode(currentDevice.id, peerId);
     const pkt = meshNetwork.createPacket('PAIR_REQUEST', currentDevice, peerId, {
@@ -1215,7 +1249,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       );
       if (resource.realFileBlob) {
         localBlobsRef.current.set(resource.id, resource.realFileBlob);
-        meshNetwork.registerFileProvider(resource.id, () => resource.realFileBlob || null);
+        meshNetwork.registerFileProvider(resource.id, async () => resource.realFileBlob || null);
       }
       // Broadcast lightweight metadata without giant data/blob URLs
       const sanitizedList = nextList.map((f) => ({
@@ -1519,6 +1553,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const seekStream = useCallback((seconds: number) => {
     setActiveStream((curr) => {
       if (!curr) return null;
+      streamChunksRef.current.set(curr.id, []);
       const targetOffset = Math.floor((seconds / Math.max(1, curr.durationSeconds)) * curr.totalSizeBytes);
       const pkt = meshNetwork.createPacket('STREAM_REQUEST', currentDevice, curr.peerId, {
         sessionId: curr.id,
@@ -1533,13 +1568,19 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
         ...curr,
         currentPositionSeconds: seconds,
         rangeOffsetBytes: targetOffset,
+        bufferedBytes: 0,
         requestCount: curr.requestCount + 1,
       };
     });
   }, [currentDevice]);
 
   const closeStream = useCallback(() => {
-    setActiveStream(null);
+    setActiveStream((curr) => {
+      if (curr) {
+        streamChunksRef.current.delete(curr.id);
+      }
+      return null;
+    });
   }, []);
 
   // Messaging & Collaboration

@@ -28,11 +28,20 @@ async function startServer() {
 
   const peers = new Map<string, ConnectedPeer>();
   const packetQueues = new Map<string, any[]>(); // targetPeerId -> packets[]
+  const longPollWaiters = new Map<string, (packets: any[]) => void>(); // targetPeerId -> waiter callback
   const MAX_QUEUE_SIZE = 500;
   const WS_MAX_BUFFERED = 4 * 1024 * 1024; // 4 MB socket backpressure limit
 
   // Helper to push into queue with priority signaling preservation
   const enqueuePacket = (targetId: string, packet: any) => {
+    // If there is an active HTTP long-poll waiter for this peer, deliver immediately!
+    const waiter = longPollWaiters.get(targetId);
+    if (waiter) {
+      longPollWaiters.delete(targetId);
+      waiter([packet]);
+      return;
+    }
+
     if (!packetQueues.has(targetId)) {
       packetQueues.set(targetId, []);
     }
@@ -80,13 +89,41 @@ async function startServer() {
     clearInterval(heartbeatInterval);
   });
 
-  wss.on('connection', (ws: any) => {
+  wss.on('connection', (ws: any, req: http.IncomingMessage) => {
     ws.isAlive = true;
     ws.on('pong', () => {
       ws.isAlive = true;
     });
 
     let peerId: string | null = null;
+
+    // Fast-path: extract peerId from URL search param immediately on connection
+    try {
+      const parsedUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
+      const queryPeerId = parsedUrl.searchParams.get('peerId');
+      if (queryPeerId) {
+        peerId = queryPeerId;
+        const existing = peers.get(queryPeerId);
+        peers.set(queryPeerId, {
+          id: queryPeerId,
+          name: existing?.name || 'Mesh Peer',
+          ws,
+          lastSeen: Date.now(),
+          metadata: existing?.metadata || { id: queryPeerId },
+        });
+
+        // Instantly flush any packets that arrived before WebSocket handshake completed
+        const queued = packetQueues.get(queryPeerId) || [];
+        if (queued.length > 0) {
+          packetQueues.set(queryPeerId, []);
+          for (const pkt of queued) {
+            try {
+              ws.send(JSON.stringify(pkt));
+            } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {}
 
     ws.on('message', (raw: any, isBinary: boolean) => {
       try {
@@ -269,16 +306,12 @@ async function startServer() {
     res.json({ success: true, timestamp: Date.now() });
   });
 
-  // HTTP Long-Poll for packets (GET)
+  // HTTP Real Long-Poll for packets (GET with immediate wake-up)
   app.get('/api/mesh/poll', (req, res) => {
     const peerId = req.query.peerId as string;
     if (!peerId) {
       return res.status(400).json({ error: 'Missing peerId parameter' });
     }
-
-    const queue = packetQueues.get(peerId) || [];
-    const packets = [...queue];
-    packetQueues.set(peerId, []); // drain queue
 
     // Update peer presence
     const existing = peers.get(peerId);
@@ -288,7 +321,38 @@ async function startServer() {
       peers.set(peerId, { id: peerId, name: 'Mesh Peer', lastSeen: Date.now() });
     }
 
-    res.json({ packets });
+    const queue = packetQueues.get(peerId) || [];
+    if (queue.length > 0) {
+      const packets = [...queue];
+      packetQueues.set(peerId, []); // drain queue
+      return res.json({ packets });
+    }
+
+    // Long-poll waiting: wait up to 8s for packets to arrive, returning immediately upon delivery
+    let isFinished = false;
+    const timer = setTimeout(() => {
+      if (!isFinished) {
+        isFinished = true;
+        longPollWaiters.delete(peerId);
+        res.json({ packets: [] });
+      }
+    }, 8000);
+
+    longPollWaiters.set(peerId, (incomingPackets) => {
+      if (!isFinished) {
+        isFinished = true;
+        clearTimeout(timer);
+        res.json({ packets: incomingPackets });
+      }
+    });
+
+    req.on('close', () => {
+      if (!isFinished) {
+        isFinished = true;
+        clearTimeout(timer);
+        longPollWaiters.delete(peerId);
+      }
+    });
   });
 
   // List active online mesh peers on this relay

@@ -41,7 +41,7 @@ export async function computeSha256(data: string | Uint8Array): Promise<string> 
   // Check if crypto.subtle is available (requires HTTPS or localhost)
   if (typeof window !== 'undefined' && window.crypto && window.crypto.subtle) {
     try {
-      const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
       const hashBuffer = await window.crypto.subtle.digest('SHA-256', buffer);
       const hashArray = Array.from(new Uint8Array(hashBuffer));
       return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');

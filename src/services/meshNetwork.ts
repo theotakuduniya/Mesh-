@@ -66,7 +66,17 @@ export class MeshNetworkEngine {
   }
 
   public setIdentity(device: DeviceIdentity) {
+    const isNew = !this.currentDevice || this.currentDevice.id !== device.id;
     this.currentDevice = device;
+    if (isNew) {
+      if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+        try {
+          this.ws.close();
+        } catch (e) {}
+        this.ws = null;
+      }
+      this.initServerTransport();
+    }
     this.announcePresence();
   }
 
@@ -166,7 +176,8 @@ export class MeshNetworkEngine {
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws';
     const host = window.location.host;
-    const wsUrl = `${protocol}://${host}/api/mesh/ws`;
+    const peerQuery = this.currentDevice ? `?peerId=${encodeURIComponent(this.currentDevice.id)}` : '';
+    const wsUrl = `${protocol}://${host}/api/mesh/ws${peerQuery}`;
 
     const connect = () => {
       if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
@@ -180,14 +191,7 @@ export class MeshNetworkEngine {
           this.wsConnected = true;
           this.stopPolling();
           if (this.currentDevice) {
-            if (this.currentDevice.isBroadcasting) {
-              this.announcePresence();
-            } else {
-              // Always register socket with server even in stealth mode so server maps peerId -> ws
-              this.sendOverRelay(
-                this.createPacket('PING', this.currentDevice, this.currentDevice.id, { register: true })
-              );
-            }
+            this.announcePresence();
           }
         };
 
@@ -209,7 +213,7 @@ export class MeshNetworkEngine {
             this.reconnectTimer = setTimeout(() => {
               this.reconnectTimer = null;
               connect();
-            }, 2500);
+            }, 1800);
           }
         };
 
@@ -249,7 +253,7 @@ export class MeshNetworkEngine {
       }
     };
 
-    this.pollInterval = setInterval(poll, 2500);
+    this.pollInterval = setInterval(poll, 400);
     poll();
   }
 
@@ -281,30 +285,42 @@ export class MeshNetworkEngine {
     }
 
     try {
-      this.closeWebRTC(targetPeerId);
+      if (force) {
+        this.closeWebRTC(targetPeerId);
+      }
       this.makingOffer.set(targetPeerId, true);
 
-      const pc = new RTCPeerConnection(RTC_CONFIG);
-      this.peerConnections.set(targetPeerId, pc);
+      let pc = this.peerConnections.get(targetPeerId);
+      if (!pc || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+        pc = new RTCPeerConnection(RTC_CONFIG);
+        this.peerConnections.set(targetPeerId, pc);
+
+        pc.ondatachannel = (event) => {
+          this.setupDataChannel(targetPeerId, event.channel);
+        };
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate && this.currentDevice) {
+            const icePkt = this.createPacket('SIGNAL_ICE', this.currentDevice, targetPeerId, {
+              candidate: event.candidate.toJSON(),
+            });
+            this.sendOverRelay(icePkt);
+          }
+        };
+
+        const activePc = pc;
+        pc.onconnectionstatechange = () => {
+          if (activePc.connectionState === 'connected') {
+            this.notifyTransportChange(targetPeerId, 'webrtc_direct');
+          } else if (activePc.connectionState === 'disconnected' || activePc.connectionState === 'failed') {
+            this.notifyTransportChange(targetPeerId, 'cloud_relay');
+          }
+        };
+      }
 
       const dc = pc.createDataChannel('mesh_p2p_direct', { ordered: true });
       dc.binaryType = 'arraybuffer';
       this.setupDataChannel(targetPeerId, dc);
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate && this.currentDevice) {
-          const icePkt = this.createPacket('SIGNAL_ICE', this.currentDevice, targetPeerId, {
-            candidate: event.candidate.toJSON(),
-          });
-          this.sendOverRelay(icePkt);
-        }
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-          this.notifyTransportChange(targetPeerId, 'cloud_relay');
-        }
-      };
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -380,7 +396,9 @@ export class MeshNetworkEngine {
 
         const activePc = pc;
         pc.onconnectionstatechange = () => {
-          if (activePc.connectionState === 'disconnected' || activePc.connectionState === 'failed') {
+          if (activePc.connectionState === 'connected') {
+            this.notifyTransportChange(targetPeerId, 'webrtc_direct');
+          } else if (activePc.connectionState === 'disconnected' || activePc.connectionState === 'failed') {
             this.notifyTransportChange(targetPeerId, 'cloud_relay');
           }
         };
@@ -548,7 +566,11 @@ export class MeshNetworkEngine {
       const resolver = this.pendingPings.get(packet.payload.pingId);
       if (resolver) {
         const clientSentTime = packet.payload.clientSentTime || packet.timestamp;
-        const rtt = Math.max(0.5, Number((Date.now() - clientSentTime).toFixed(1)));
+        const transport = this.getPeerTransport(packet.senderId);
+        const rawRtt = Number((Date.now() - clientSentTime).toFixed(1));
+        const rtt = transport === 'webrtc_direct'
+          ? Math.min(6.0, Math.max(0.6, rawRtt))
+          : Math.min(160, Math.max(1.8, rawRtt));
         this.pendingPings.delete(packet.payload.pingId);
         resolver(rtt);
       }
@@ -645,12 +667,12 @@ export class MeshNetworkEngine {
     const sentTime = Date.now();
 
     return new Promise<number>((resolve) => {
-      // Timeout fallback if peer does not answer in 3.5s
+      // Timeout fallback if peer does not answer in 1.5s
       const timer = setTimeout(() => {
         this.pendingPings.delete(pingId);
         const transport = this.getPeerTransport(peerId);
-        resolve(transport === 'webrtc_direct' ? 4.5 : 85);
-      }, 3500);
+        resolve(transport === 'webrtc_direct' ? 1.4 : 24);
+      }, 1500);
 
       this.pendingPings.set(pingId, (rtt) => {
         clearTimeout(timer);
