@@ -22,10 +22,12 @@ import {
   X,
   Play,
   ChevronDown,
+  ArrowLeft,
 } from 'lucide-react';
 import { useMesh } from '../../context/MeshContext';
 import { SharedFolder, VirtualResource } from '../../types/mesh';
 import { formatBytes, generateRandomId, computeSha256 } from '../../services/crypto';
+import { generateImageThumbnail, createSampleTestVideo } from '../../services/virtualFs';
 
 export const SharedSpaceView: React.FC = () => {
   const {
@@ -141,7 +143,12 @@ export const SharedSpaceView: React.FC = () => {
       const file = files[i];
       const type = getResourceType(file.type, file.name);
       const isStreamable = type === 'video' || type === 'audio';
-      const previewUrl = await readFileAsDataUrl(file);
+      let previewUrl: string | undefined = undefined;
+      if (type === 'image') {
+        previewUrl = await generateImageThumbnail(file);
+      } else if (file.size <= 100 * 1024) {
+        previewUrl = await readFileAsDataUrl(file);
+      }
 
       let checksum = 'sha256_computing';
       try {
@@ -240,6 +247,22 @@ export const SharedSpaceView: React.FC = () => {
     setIsMountModalOpen(false);
     setUploadFeedback(`Mounted local PC folder "${rootName}" with ${resources.length} files (${formatBytes(totalBytes)})`);
     setTimeout(() => setUploadFeedback(null), 4000);
+  };
+
+  const [isGeneratingSample, setIsGeneratingSample] = useState(false);
+
+  const handleCreateSampleVideo = async () => {
+    setIsGeneratingSample(true);
+    try {
+      const sampleFile = await createSampleTestVideo();
+      const dt = new DataTransfer();
+      dt.items.add(sampleFile);
+      await handleRealFilesUpload(dt.files);
+    } catch (err) {
+      console.warn('Error generating sample video:', err);
+    } finally {
+      setIsGeneratingSample(false);
+    }
   };
 
   // Drag & drop handlers
@@ -407,10 +430,10 @@ export const SharedSpaceView: React.FC = () => {
       <div className="flex-1 flex justify-center overflow-hidden w-full">
         <div className="max-w-5xl w-full flex flex-col overflow-hidden h-full">
           {/* Two-Pane Centered Layout */}
-          <div className="flex-1 flex overflow-hidden p-6 gap-5">
+          <div className="flex-1 flex overflow-hidden p-3 sm:p-6 gap-3 sm:gap-5">
             {/* CSS selector 2: Left Pane: Virtual Mounts */}
             {!isFoldersCollapsed ? (
-              <div className="w-64 bg-[#12141a] border border-white/[0.06] rounded-xl p-3 overflow-y-auto space-y-3 shrink-0 flex flex-col justify-between">
+              <div className={`${selectedFolder ? 'hidden sm:flex' : 'w-full'} sm:w-64 bg-[#12141a] border border-white/[0.06] rounded-xl p-3 overflow-y-auto space-y-3 shrink-0 flex flex-col justify-between`}>
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between px-2 py-1">
                     <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
@@ -499,17 +522,24 @@ export const SharedSpaceView: React.FC = () => {
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
-              className={`flex-1 rounded-xl border border-white/[0.06] p-5 overflow-y-auto space-y-5 transition-colors ${
+              className={`${!selectedFolder ? 'hidden sm:block' : 'block'} flex-1 rounded-xl border border-white/[0.06] p-3 sm:p-5 overflow-y-auto space-y-4 sm:space-y-5 transition-colors ${
                 isDraggingOver ? 'bg-blue-950/20 ring-2 ring-blue-500/50' : 'bg-[#12141a]'
               }`}
             >
               {selectedFolder ? (
                 <>
                   {/* Folder Header & Permissions */}
-                  <div className="p-4 rounded-xl bg-zinc-900/60 border border-white/[0.06] space-y-3">
+                  <div className="p-3.5 sm:p-4 rounded-xl bg-zinc-900/60 border border-white/[0.06] space-y-3">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                       <div>
                         <h2 className="text-sm font-bold text-white font-mono flex items-center gap-2">
+                          <button
+                            onClick={() => setSelectedFolderId('')}
+                            className="sm:hidden p-1 -ml-1 rounded text-zinc-400 hover:text-white"
+                            title="Back to virtual mounts"
+                          >
+                            <ArrowLeft className="w-4 h-4" />
+                          </button>
                           <FolderLock className="w-4 h-4 text-blue-400" />
                           <span>{selectedFolder.virtualRoot}</span>
                         </h2>
@@ -691,6 +721,21 @@ export const SharedSpaceView: React.FC = () => {
                                 <div className="text-[10px] text-zinc-400">Mount an entire folder from PC</div>
                               </div>
                             </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsUploadDropdownOpen(false);
+                                handleCreateSampleVideo();
+                              }}
+                              className="w-full px-3.5 py-2.5 text-left text-xs text-purple-300 hover:text-white hover:bg-purple-950/40 flex items-center gap-2.5 transition-colors"
+                            >
+                              <Video className="w-4 h-4 text-purple-400 shrink-0" />
+                              <div>
+                                <div className="font-medium text-purple-200">Create Test Video</div>
+                                <div className="text-[10px] text-purple-400/80">Generate 2s HD P2P video stream</div>
+                              </div>
+                            </button>
                           </div>
                         )}
                       </div>
@@ -698,7 +743,7 @@ export const SharedSpaceView: React.FC = () => {
                   </div>
                 </>
               ) : (
-                <div className="py-20 px-6 text-center flex flex-col items-center justify-center space-y-4">
+                <div className="py-16 sm:py-20 px-4 sm:px-6 text-center flex flex-col items-center justify-center space-y-4">
                   <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-white/10 flex items-center justify-center text-zinc-400">
                     <FolderLock className="w-7 h-7 text-blue-400" />
                   </div>
@@ -708,20 +753,29 @@ export const SharedSpaceView: React.FC = () => {
                       Your local shared space is currently empty and private. Mount a folder from your computer or select files to share with paired peers.
                     </p>
                   </div>
-                  <div className="flex items-center gap-3 pt-2">
-                    <button
-                      onClick={() => realFolderInputRef.current?.click()}
-                      className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors flex items-center gap-2 shadow-xs cursor-pointer"
-                    >
-                      <FolderPlus className="w-4 h-4" />
-                      <span>Mount Folder from PC</span>
-                    </button>
+                  <div className="flex flex-wrap items-center justify-center gap-2.5 pt-2">
                     <button
                       onClick={() => realFileInputRef.current?.click()}
+                      className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors flex items-center gap-2 shadow-xs cursor-pointer"
+                    >
+                      <Upload className="w-4 h-4" />
+                      <span>Select Files to Share</span>
+                    </button>
+                    <button
+                      onClick={() => realFolderInputRef.current?.click()}
                       className="px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-white/10 text-xs font-medium transition-colors flex items-center gap-2 cursor-pointer"
                     >
-                      <Upload className="w-4 h-4 text-blue-400" />
-                      <span>Select Files to Share</span>
+                      <FolderPlus className="w-4 h-4 text-blue-400" />
+                      <span>Mount Folder</span>
+                    </button>
+                    <button
+                      onClick={handleCreateSampleVideo}
+                      disabled={isGeneratingSample}
+                      className="px-3 py-2 rounded-lg bg-purple-950/60 hover:bg-purple-900/80 text-purple-300 border border-purple-500/30 text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      title="Quickly generate a real 2-second video blob to test P2P video streaming"
+                    >
+                      <Video className="w-3.5 h-3.5 text-purple-400" />
+                      <span>{isGeneratingSample ? 'Generating...' : 'Create Sample Video'}</span>
                     </button>
                   </div>
                 </div>

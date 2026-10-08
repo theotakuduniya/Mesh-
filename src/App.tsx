@@ -53,7 +53,7 @@ const MeshAppContent: React.FC = () => {
         <Sidebar />
 
         {/* Dynamic Viewport */}
-        <main className="flex-1 flex flex-col overflow-hidden relative">
+        <main className="flex-1 flex flex-col overflow-hidden relative pb-14 md:pb-0">
           {renderActiveView()}
         </main>
       </div>

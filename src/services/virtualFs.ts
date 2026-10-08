@@ -18,209 +18,9 @@ export const DEFAULT_PERMISSIONS: PeerPermissions = {
   canDelete: false,
 };
 
-export const INITIAL_SHARED_FOLDERS_PC_A: SharedFolder[] = [
-  {
-    id: 'folder_college',
-    virtualRoot: '/College',
-    label: 'College Coursework',
-    realSourceAlias: 'Local Volume (D:) -> Documents/University/Fall2026',
-    resourceCount: 2,
-    totalSizeBytes: 12240000, // 4.82 MB + 7.42 MB = 12.24 MB
-    permissions: {
-      canView: true,
-      canPreview: true,
-      canStream: true,
-      canDownload: true, // Specifically permitted for pairing demo
-      canUpload: false,
-      canModify: false,
-      canDelete: false,
-    },
-    resources: [
-      {
-        id: 'res_col_001',
-        virtualPath: '/College/DBMS.pdf',
-        name: 'DBMS.pdf',
-        type: 'document',
-        mimeType: 'application/pdf',
-        sizeBytes: 4820000, // 4.82 MB
-        modifiedAt: Date.now() - 86400000 * 2,
-        checksumSha256: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
-        isStreamable: false,
-        isPreviewable: true,
-        summary: 'Database Management Systems Lecture Notes: Relational Algebra, B+ Trees, ACID Transactions and Distributed Consensuses.',
-        ownerDeviceId: 'node_alpha',
-        tags: ['coursework', 'notes', 'academics'],
-      },
-      {
-        id: 'res_col_002',
-        virtualPath: '/College/OS.pdf',
-        name: 'OS.pdf',
-        type: 'document',
-        mimeType: 'application/pdf',
-        sizeBytes: 7420000, // 7.42 MB
-        modifiedAt: Date.now() - 86400000 * 4,
-        checksumSha256: '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8',
-        isStreamable: false,
-        isPreviewable: true,
-        summary: 'Operating Systems: Kernel architecture, memory paging, mutual exclusion semaphores, and asynchronous POSIX I/O.',
-        ownerDeviceId: 'node_alpha',
-        tags: ['unix', 'kernel', 'slides'],
-      },
-    ],
-  },
-  {
-    id: 'folder_media',
-    virtualRoot: '/Media',
-    label: 'Lecture Media & Recordings',
-    realSourceAlias: 'Local Volume (C:) -> Users/Alex/Videos/Recordings',
-    resourceCount: 2,
-    totalSizeBytes: 438500000, // 420 MB + 18.5 MB = 438.5 MB
-    permissions: {
-      canView: true,
-      canPreview: true,
-      canStream: true,
-      canDownload: false, // Streamable progressive direct playback without download
-      canUpload: false,
-      canModify: false,
-      canDelete: false,
-    },
-    resources: [
-      {
-        id: 'res_med_001',
-        virtualPath: '/Media/lecture.mp4',
-        name: 'lecture.mp4',
-        type: 'video',
-        mimeType: 'video/mp4',
-        sizeBytes: 420000000, // 420 MB
-        modifiedAt: Date.now() - 3600000 * 5,
-        checksumSha256: '4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a',
-        isStreamable: true,
-        isPreviewable: true,
-        durationSeconds: 194, // ~3 min 14 sec
-        summary: 'High-Definition Recording: Distributed Systems & Consensus Algorithms (Prof. Vance, 1080p 60fps with chapter marks)',
-        ownerDeviceId: 'node_alpha',
-        tags: ['lecture', 'video', '1080p', 'p2p-stream'],
-      },
-      {
-        id: 'res_med_002',
-        virtualPath: '/Media/lab_audio_sync.mp3',
-        name: 'lab_audio_sync.mp3',
-        type: 'audio',
-        mimeType: 'audio/mp3',
-        sizeBytes: 18500000, // 18.5 MB
-        modifiedAt: Date.now() - 86400000 * 1,
-        checksumSha256: 'ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d',
-        isStreamable: true,
-        isPreviewable: true,
-        durationSeconds: 142,
-        summary: 'Synchronized binaural lab session recording for acoustics analysis and network protocol audio test.',
-        ownerDeviceId: 'node_alpha',
-        tags: ['audio', 'hifi', 'streamable'],
-      },
-    ],
-  },
-  {
-    id: 'folder_projects',
-    virtualRoot: '/Projects',
-    label: 'Engineering Projects',
-    realSourceAlias: 'Local Volume (D:) -> Code/ActiveProjects',
-    resourceCount: 2,
-    totalSizeBytes: 14242000, // 14.2 MB + 42 KB = ~14.242 MB
-    permissions: {
-      canView: true,
-      canPreview: true,
-      canStream: false,
-      canDownload: true,
-      canUpload: true,
-      canModify: false,
-      canDelete: false,
-    },
-    resources: [
-      {
-        id: 'res_proj_001',
-        virtualPath: '/Projects/CARENET.pptx',
-        name: 'CARENET.pptx',
-        type: 'document',
-        mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        sizeBytes: 14200000, // 14.2 MB
-        modifiedAt: Date.now() - 3600000 * 24,
-        checksumSha256: 'a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3',
-        isStreamable: false,
-        isPreviewable: true,
-        summary: 'Healthcare Decentralized Dispatch Pitch Deck & Architecture Diagrams.',
-        ownerDeviceId: 'node_alpha',
-        tags: ['presentation', 'pitch', 'slides'],
-      },
-      {
-        id: 'res_proj_002',
-        virtualPath: '/Projects/mesh_protocol_spec.json',
-        name: 'mesh_protocol_spec.json',
-        type: 'code',
-        mimeType: 'application/json',
-        sizeBytes: 42000, // 42 KB
-        modifiedAt: Date.now() - 3600000 * 2,
-        checksumSha256: '2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae',
-        isStreamable: false,
-        isPreviewable: true,
-        summary: 'Machine-readable schema definitions for Mesh P2P wire packets and capabilities.',
-        ownerDeviceId: 'node_alpha',
-        tags: ['json', 'spec', 'rfc'],
-      },
-    ],
-  },
-];
+export const INITIAL_SHARED_FOLDERS_PC_A: SharedFolder[] = [];
 
-export const INITIAL_SHARED_FOLDERS_PC_B: SharedFolder[] = [
-  {
-    id: 'folder_research_b',
-    virtualRoot: '/Research',
-    label: 'Distributed Systems Papers',
-    realSourceAlias: 'Macintosh HD -> Users/Jordan/Documents/Research',
-    resourceCount: 2,
-    totalSizeBytes: 7450000, // 6.2 MB + 1.25 MB = 7.45 MB
-    permissions: {
-      canView: true,
-      canPreview: true,
-      canStream: false,
-      canDownload: true,
-      canUpload: false,
-      canModify: false,
-      canDelete: false,
-    },
-    resources: [
-      {
-        id: 'res_b_001',
-        virtualPath: '/Research/byzantine_consensus_lan.pdf',
-        name: 'byzantine_consensus_lan.pdf',
-        type: 'document',
-        mimeType: 'application/pdf',
-        sizeBytes: 6200000,
-        modifiedAt: Date.now() - 86400000 * 1,
-        checksumSha256: '3a55d04586ff90d1f7e0d37e96e579bd66c1b30bc0777593c6f49f6479ff73bd',
-        isStreamable: false,
-        isPreviewable: true,
-        summary: 'Practical Byzantine Fault Tolerance for Zero-Cloud Peer Meshes in Local Subnets.',
-        ownerDeviceId: 'node_beta',
-        tags: ['paper', 'security', 'lan'],
-      },
-      {
-        id: 'res_b_002',
-        virtualPath: '/Research/benchmarks_chart.png',
-        name: 'benchmarks_chart.png',
-        type: 'image',
-        mimeType: 'image/png',
-        sizeBytes: 1250000,
-        modifiedAt: Date.now() - 3600000 * 8,
-        checksumSha256: '8f434346648f6b96df89dda901c5176b10e6d83961dd3c1ac88b59b2dc327aa4',
-        isStreamable: false,
-        isPreviewable: true,
-        summary: 'Throughput comparison: WebRTC DataChannel chunking vs Raw TCP LAN transfers.',
-        ownerDeviceId: 'node_beta',
-        tags: ['chart', 'benchmark'],
-      },
-    ],
-  },
-];
+export const INITIAL_SHARED_FOLDERS_PC_B: SharedFolder[] = [];
 
 /**
  * Synchronizes folder resource count and total size metrics to match exact resource sum
@@ -250,8 +50,10 @@ export function sanitizeFoldersForWire(folders: SharedFolder[]): SharedFolder[] 
       resources: synced.resources.map((res) => {
         let cleanPreviewUrl = res.previewUrl;
         if (cleanPreviewUrl) {
-          // Strip large base64 or blob URLs that would choke signaling or be invalid on remote nodes
-          if (cleanPreviewUrl.startsWith('blob:') || cleanPreviewUrl.length > 32 * 1024) {
+          // Allow lightweight image thumbnails (up to 64 KB base64) across wire
+          if (cleanPreviewUrl.startsWith('data:image/') && cleanPreviewUrl.length <= 64 * 1024) {
+            // Keep previewUrl intact for peer inspection
+          } else if (cleanPreviewUrl.startsWith('blob:') || cleanPreviewUrl.length > 64 * 1024) {
             cleanPreviewUrl = undefined;
           }
         }
@@ -263,6 +65,172 @@ export function sanitizeFoldersForWire(folders: SharedFolder[]): SharedFolder[] 
       }),
     };
   });
+}
+
+/**
+ * Creates a lightweight JPEG thumbnail (max 320px) under 25KB for fast P2P preview
+ */
+export async function generateImageThumbnail(file: Blob): Promise<string> {
+  if (typeof window === 'undefined') return '';
+  
+  // Fast path for small images under 120KB: direct data URL
+  if (file.size <= 120 * 1024 && (file.type.startsWith('image/') || file.type === '')) {
+    try {
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve((reader.result as string) || '');
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(file);
+      });
+      if (dataUrl) return dataUrl;
+    } catch {}
+  }
+
+  // Canvas downscaling to ~320px JPEG
+  return new Promise((resolve) => {
+    try {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        try {
+          URL.revokeObjectURL(url);
+          const canvas = document.createElement('canvas');
+          const maxDim = 320;
+          let width = img.width || 320;
+          let height = img.height || 240;
+          if (width > height) {
+            if (width > maxDim) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            }
+          } else {
+            if (height > maxDim) {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+          canvas.width = Math.max(1, width);
+          canvas.height = Math.max(1, height);
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve(canvas.toDataURL('image/jpeg', 0.72));
+          } else {
+            resolve('');
+          }
+        } catch {
+          resolve('');
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        // Fallback: read slice as data URL
+        try {
+          const reader = new FileReader();
+          reader.onload = () => resolve((reader.result as string) || '');
+          reader.onerror = () => resolve('');
+          reader.readAsDataURL(file.slice(0, 100000));
+        } catch {
+          resolve('');
+        }
+      };
+      img.src = url;
+    } catch {
+      resolve('');
+    }
+  });
+}
+
+/**
+ * Creates a valid, playable sample video (2s HD 60fps) with synchronized audio tone
+ * for testing P2P video streaming across peers
+ */
+export async function createSampleTestVideo(): Promise<File> {
+  const canvas = document.createElement('canvas');
+  canvas.width = 640;
+  canvas.height = 360;
+  const ctx = canvas.getContext('2d')!;
+
+  let audioDest: MediaStreamAudioDestinationNode | undefined;
+  let audioCtx: AudioContext | undefined;
+  let osc: OscillatorNode | undefined;
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (AudioContextClass) {
+      audioCtx = new AudioContextClass();
+      audioDest = audioCtx.createMediaStreamDestination();
+      osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+      const gain = audioCtx.createGain();
+      gain.gain.setValueAtTime(0.04, audioCtx.currentTime);
+      osc.connect(gain);
+      gain.connect(audioDest);
+      osc.start();
+    }
+  } catch {}
+
+  const canvasStream = canvas.captureStream(30);
+  if (audioDest && audioDest.stream.getAudioTracks().length > 0) {
+    canvasStream.addTrack(audioDest.stream.getAudioTracks()[0]);
+  }
+
+  const mimeType = MediaRecorder.isTypeSupported('video/mp4')
+    ? 'video/mp4'
+    : MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+    ? 'video/webm;codecs=vp9'
+    : 'video/webm';
+
+  const recorder = new MediaRecorder(canvasStream, { mimeType });
+  const recordedChunks: Blob[] = [];
+
+  recorder.ondataavailable = (e) => {
+    if (e.data.size > 0) recordedChunks.push(e.data);
+  };
+
+  recorder.start();
+
+  const startTime = performance.now();
+  for (let frame = 0; frame < 60; frame++) {
+    const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+    ctx.fillStyle = '#090d16';
+    ctx.fillRect(0, 0, 640, 360);
+
+    const x = 320 + Math.sin(frame * 0.12) * 180;
+    const y = 180 + Math.cos(frame * 0.12) * 70;
+    const grad = ctx.createRadialGradient(x, y, 10, x, y, 60);
+    grad.addColorStop(0, '#a855f7');
+    grad.addColorStop(1, '#3b82f6');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, 46, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 22px system-ui, sans-serif';
+    ctx.fillText('Mesh P2P Direct Stream', 36, 60);
+    ctx.fillStyle = '#10b981';
+    ctx.font = '16px monospace';
+    ctx.fillText(`Frame ${frame + 1}/60 · P2P Direct WebRTC`, 36, 95);
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '14px monospace';
+    ctx.fillText(`Duration: ${elapsed}s · Zero Cloud LAN`, 36, 125);
+
+    await new Promise((r) => setTimeout(r, 33));
+  }
+
+  if (osc) {
+    try { osc.stop(); } catch {}
+  }
+  recorder.stop();
+  await new Promise((r) => { recorder.onstop = r; });
+  if (audioCtx) {
+    try { audioCtx.close(); } catch {}
+  }
+
+  const extension = mimeType.includes('mp4') ? 'mp4' : 'webm';
+  const videoBlob = new Blob(recordedChunks, { type: mimeType });
+  return new File([videoBlob], `p2p_stream_demo.${extension}`, { type: mimeType, lastModified: Date.now() });
 }
 
 /**

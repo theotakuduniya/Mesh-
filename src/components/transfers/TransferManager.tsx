@@ -4,9 +4,6 @@ import {
   Pause,
   Play,
   X,
-  CheckCircle2,
-  AlertCircle,
-  Activity,
   ShieldCheck,
   ChevronUp,
   ChevronDown,
@@ -15,15 +12,22 @@ import { useMesh } from '../../context/MeshContext';
 import { formatBytes } from '../../services/crypto';
 
 export const TransferManager: React.FC = () => {
-  const { activeTransfers, pauseTransfer, resumeTransfer, cancelTransfer } = useMesh();
+  const {
+    activeTransfers,
+    pauseTransfer,
+    resumeTransfer,
+    cancelTransfer,
+    isTransfersDrawerOpen,
+    setIsTransfersDrawerOpen,
+  } = useMesh();
   const [isExpanded, setIsExpanded] = useState(true);
 
-  if (activeTransfers.length === 0) return null;
+  if (activeTransfers.length === 0 || !isTransfersDrawerOpen) return null;
 
   const activeCount = activeTransfers.filter((t) => t.status === 'transferring').length;
 
   return (
-    <div className="fixed bottom-4 right-4 z-40 max-w-md w-full bg-[#12151c] border border-white/20 rounded-2xl shadow-2xl overflow-hidden transition-all duration-200">
+    <div className="fixed bottom-16 sm:bottom-4 right-2 sm:right-4 left-2 sm:left-auto max-w-md w-auto sm:w-full z-40 bg-[#12151c] border border-white/20 rounded-2xl shadow-2xl overflow-hidden transition-all duration-200">
       {/* Header */}
       <div
         onClick={() => setIsExpanded(!isExpanded)}
@@ -46,8 +50,24 @@ export const TransferManager: React.FC = () => {
               {activeCount} active
             </span>
           )}
-          <button className="text-zinc-400 hover:text-white">
+          <button
+            type="button"
+            className="p-1 rounded text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
+            title={isExpanded ? 'Collapse' : 'Expand'}
+          >
             {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+          </button>
+          {/* Close X Button to dismiss LAN transfers div */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsTransfersDrawerOpen(false);
+            }}
+            className="p-1 rounded text-zinc-400 hover:text-white hover:bg-white/10 transition-colors ml-1"
+            title="Close LAN transfers"
+          >
+            <X className="w-4 h-4" />
           </button>
         </div>
       </div>

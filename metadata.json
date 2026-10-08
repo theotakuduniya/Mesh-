@@ -1,5 +1,5 @@
 {
-  "name": "Mesh - Local-First P2P Collaboration",
+  "name": "Mesh — Local-First P2P Collaboration",
   "description": "Local-first peer-to-peer desktop collaboration layer for discovering nearby peers on LAN, pairing securely, sharing virtual spaces, exchanging clipboard and links, and streaming media directly without cloud storage.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

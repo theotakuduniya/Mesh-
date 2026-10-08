@@ -25,6 +25,7 @@ export const TitleBar: React.FC = () => {
     setIsDualModeOpen,
     activeStream,
     activeTransfers,
+    setIsTransfersDrawerOpen,
     isSidebarCollapsed,
     toggleSidebar,
     setIsOnboardingOpen,
@@ -37,18 +38,18 @@ export const TitleBar: React.FC = () => {
     <header className="h-10 bg-[#090b0e] border-b border-white/[0.06] flex items-center justify-between px-3 text-xs select-none z-50">
       {/* Left: Window Controls, Sidebar Toggle, & App Mark */}
       <div className="flex items-center gap-2.5">
-        <div className="flex items-center gap-1.5">
+        <div className="hidden sm:flex items-center gap-1.5">
           <div className="w-2.5 h-2.5 rounded-full bg-rose-500/80 hover:bg-rose-500 transition-colors cursor-pointer" />
           <div className="w-2.5 h-2.5 rounded-full bg-amber-500/80 hover:bg-amber-500 transition-colors cursor-pointer" />
           <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/80 hover:bg-emerald-500 transition-colors cursor-pointer" />
         </div>
 
-        <div className="h-3.5 w-px bg-white/10" />
+        <div className="hidden sm:block h-3.5 w-px bg-white/10" />
 
-        {/* Menu Icon to Toggle Sidebar */}
+        {/* Menu Icon to Toggle Sidebar (Desktop rail only) */}
         <button
           onClick={toggleSidebar}
-          className="p-1 rounded text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
+          className="hidden md:flex p-1 rounded text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
           title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
           {isSidebarCollapsed ? (
@@ -78,10 +79,14 @@ export const TitleBar: React.FC = () => {
         )}
 
         {activeTransferCount > 0 && (
-          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-blue-950/50 border border-blue-500/30 text-blue-300 text-[11px]">
+          <button
+            onClick={() => setIsTransfersDrawerOpen(true)}
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-blue-950/50 hover:bg-blue-900/60 border border-blue-500/30 text-blue-300 text-[11px] transition-colors cursor-pointer"
+            title="Open LAN Transfers"
+          >
             <Activity className="w-3 h-3 text-blue-400 animate-spin" />
             <span>{activeTransferCount} transfer active</span>
-          </div>
+          </button>
         )}
       </div>
 

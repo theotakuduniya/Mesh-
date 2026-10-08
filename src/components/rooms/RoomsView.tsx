@@ -5,9 +5,9 @@ import {
   Send,
   Laptop,
   ExternalLink,
-  PanelLeft,
-  PanelLeftClose,
+  ArrowLeft,
   X,
+  MessageSquare,
 } from 'lucide-react';
 import { useMesh } from '../../context/MeshContext';
 
@@ -20,8 +20,6 @@ export const RoomsView: React.FC = () => {
     messages,
     sendMessage,
     currentDevice,
-    toggleSidebar,
-    isSidebarCollapsed,
   } = useMesh();
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -29,8 +27,8 @@ export const RoomsView: React.FC = () => {
   const [newRoomDesc, setNewRoomDesc] = useState('');
   const [chatText, setChatText] = useState('');
 
-  const activeRoom = rooms.find((r) => r.id === selectedRoomId) || rooms[0];
-  const roomMessages = messages.filter((m) => m.roomId === activeRoom?.id);
+  const activeRoom = rooms.find((r) => r.id === selectedRoomId) || (rooms.length > 0 && selectedRoomId ? rooms[0] : null);
+  const roomMessages = activeRoom ? messages.filter((m) => m.roomId === activeRoom.id) : [];
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
@@ -52,21 +50,19 @@ export const RoomsView: React.FC = () => {
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#0b0d11] overflow-hidden">
-      {/* Centered Desktop Header Container */}
+      {/* Header Container */}
       <div className="w-full border-b border-white/[0.06] bg-[#0c0d12]">
-        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div>
-              <h1 className="text-xl font-bold tracking-tight text-white font-display">Rooms</h1>
-              <p className="text-xs text-zinc-400 mt-0.5">
-                Local collaboration channels on this subnet
-              </p>
-            </div>
+        <div className="max-w-5xl mx-auto px-4 py-3 sm:px-6 sm:py-4 flex items-center justify-between gap-3">
+          <div>
+            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white font-display">Rooms</h1>
+            <p className="text-xs text-zinc-400 mt-0.5">
+              Local zero-cloud collaboration channels on this subnet
+            </p>
           </div>
 
           <button
             onClick={() => setIsCreateOpen(true)}
-            className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5 shadow-xs"
+            className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>New Room</span>
@@ -74,49 +70,76 @@ export const RoomsView: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Two-Pane Centered View */}
+      {/* Main View Area */}
       <div className="flex-1 flex justify-center overflow-hidden w-full">
-        <div className="max-w-5xl w-full flex overflow-hidden h-full p-6 gap-5">
-          {/* Left Pane: Channels */}
-          <div className="w-60 bg-[#12141a] border border-white/[0.06] rounded-xl p-3 overflow-y-auto space-y-1 shrink-0">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 px-2 py-1">
-              Channels
+        <div className="max-w-5xl w-full flex overflow-hidden h-full p-3 sm:p-6 gap-3 sm:gap-5">
+          {/* Left Pane: Channels List */}
+          <div
+            className={`${
+              activeRoom ? 'hidden sm:block' : 'w-full'
+            } sm:w-60 bg-[#12141a] border border-white/[0.06] rounded-xl p-3 overflow-y-auto space-y-1 shrink-0`}
+          >
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 px-2 py-1 flex items-center justify-between">
+              <span>Channels</span>
+              <span className="font-mono">{rooms.length}</span>
             </div>
 
-            {rooms.map((room) => {
-              const isSelected = activeRoom?.id === room.id;
-              return (
+            {rooms.length === 0 ? (
+              <div className="text-center py-12 px-3 space-y-3">
+                <Users2 className="w-8 h-8 text-zinc-600 mx-auto" />
+                <div className="text-xs text-zinc-400 font-medium">No rooms created yet</div>
                 <button
-                  key={room.id}
-                  onClick={() => setSelectedRoomId(room.id)}
-                  className={`w-full text-left p-2.5 rounded-lg transition-colors ${
-                    isSelected
-                      ? 'bg-zinc-800 text-white font-medium border border-white/10'
-                      : 'text-zinc-400 hover:text-white hover:bg-white/[0.03] border border-transparent'
-                  }`}
+                  onClick={() => setIsCreateOpen(true)}
+                  className="px-3 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg border border-white/5 transition-colors"
                 >
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="truncate">#{room.name}</span>
-                    <span className="text-[10px] text-zinc-500 font-mono">
-                      {room.memberPeerIds.length}
-                    </span>
-                  </div>
+                  Create First Room
                 </button>
-              );
-            })}
+              </div>
+            ) : (
+              rooms.map((room) => {
+                const isSelected = activeRoom?.id === room.id;
+                return (
+                  <button
+                    key={room.id}
+                    onClick={() => setSelectedRoomId(room.id)}
+                    className={`w-full text-left p-2.5 rounded-lg transition-colors ${
+                      isSelected
+                        ? 'bg-zinc-800 text-white font-medium border border-white/10'
+                        : 'text-zinc-400 hover:text-white hover:bg-white/[0.03] border border-transparent'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="truncate">#{room.name}</span>
+                      <span className="text-[10px] text-zinc-500 font-mono">
+                        {room.memberPeerIds.length}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })
+            )}
           </div>
 
-          {/* Right Pane: Room Discussion */}
+          {/* Right Pane: Room Discussion or Empty State */}
           {activeRoom ? (
-            <div className="flex-1 flex flex-col overflow-hidden bg-[#12141a] border border-white/[0.06] rounded-xl">
+            <div className="flex-1 flex flex-col overflow-hidden bg-[#12141a] border border-white/[0.06] rounded-xl w-full">
               {/* Room Subheader */}
-              <div className="px-5 py-3 border-b border-white/[0.06] bg-zinc-900/50 flex items-center justify-between">
-                <div>
-                  <h2 className="text-xs font-bold text-white font-mono">#{activeRoom.name}</h2>
-                  <div className="text-[11px] text-zinc-400 truncate">{activeRoom.description}</div>
+              <div className="px-4 py-3 sm:px-5 sm:py-3 border-b border-white/[0.06] bg-zinc-900/50 flex items-center justify-between">
+                <div className="flex items-center gap-2 min-w-0">
+                  <button
+                    onClick={() => setSelectedRoomId(null)}
+                    className="sm:hidden p-1 rounded text-zinc-400 hover:text-white hover:bg-white/5 transition-colors mr-1"
+                    title="Back to channels"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                  </button>
+                  <div className="min-w-0">
+                    <h2 className="text-xs font-bold text-white font-mono truncate">#{activeRoom.name}</h2>
+                    <div className="text-[11px] text-zinc-400 truncate">{activeRoom.description}</div>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1 shrink-0">
                   {activeRoom.memberPeerIds.map((id) => (
                     <div
                       key={id}
@@ -130,10 +153,10 @@ export const RoomsView: React.FC = () => {
               </div>
 
               {/* Messages */}
-              <div className="flex-1 p-5 overflow-y-auto space-y-2.5">
+              <div className="flex-1 p-4 sm:p-5 overflow-y-auto space-y-2.5">
                 {roomMessages.length === 0 ? (
                   <div className="text-center py-20 text-zinc-500 text-xs">
-                    No messages yet in #{activeRoom.name}.
+                    No messages yet in #{activeRoom.name}. Send the first message below.
                   </div>
                 ) : (
                   roomMessages.map((msg) => {
@@ -147,7 +170,7 @@ export const RoomsView: React.FC = () => {
                           {msg.senderName}
                         </div>
                         <div
-                          className={`max-w-[80%] p-2.5 rounded-xl text-xs ${
+                          className={`max-w-[85%] sm:max-w-[80%] p-2.5 rounded-xl text-xs ${
                             isMe
                               ? 'bg-blue-600 text-white'
                               : 'bg-zinc-800 text-zinc-200 border border-white/5'
@@ -161,10 +184,10 @@ export const RoomsView: React.FC = () => {
                               className="underline hover:text-blue-200 flex items-center gap-1"
                             >
                               <span>{msg.text}</span>
-                              <ExternalLink className="w-3 h-3 inline" />
+                              <ExternalLink className="w-3 h-3 inline shrink-0" />
                             </a>
                           ) : (
-                            <span>{msg.text}</span>
+                            <span className="break-words">{msg.text}</span>
                           )}
                         </div>
                       </div>
@@ -174,7 +197,7 @@ export const RoomsView: React.FC = () => {
               </div>
 
               {/* Chat Input */}
-              <form onSubmit={handleSend} className="p-3 bg-zinc-900/40 border-t border-white/[0.06] flex gap-2">
+              <form onSubmit={handleSend} className="p-2.5 sm:p-3 bg-zinc-900/40 border-t border-white/[0.06] flex gap-2">
                 <input
                   type="text"
                   placeholder={`Message #${activeRoom.name}...`}
@@ -184,7 +207,7 @@ export const RoomsView: React.FC = () => {
                 />
                 <button
                   type="submit"
-                  className="px-3.5 py-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors flex items-center gap-1"
+                  className="px-3.5 py-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors flex items-center gap-1 cursor-pointer shrink-0"
                 >
                   <Send className="w-3.5 h-3.5" />
                   <span>Send</span>
@@ -192,8 +215,9 @@ export const RoomsView: React.FC = () => {
               </form>
             </div>
           ) : (
-            <div className="flex-1 flex items-center justify-center text-xs text-zinc-500 bg-[#12141a] border border-white/[0.06] rounded-xl">
-              Select or create a room.
+            <div className="hidden sm:flex flex-1 items-center justify-center text-center p-8 text-xs text-zinc-500 bg-[#12141a] border border-white/[0.06] rounded-xl flex-col space-y-2">
+              <MessageSquare className="w-8 h-8 text-zinc-600" />
+              <div>Select a channel or create a new room to collaborate with mesh peers.</div>
             </div>
           )}
         </div>
