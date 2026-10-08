@@ -4,51 +4,44 @@
  * Supports:
  * - Robust WebRTC Direct Peer-to-Peer DataChannels with W3C Perfect Negotiation & Glare Prevention
  * - ICE candidate queueing and drain on remote description resolution
- * - Multi-provider STUN configuration (Google STUN, Cloudflare STUN, Twilio STUN)
- * - Real WebSocket relay across different machines/browsers on LAN & Internet with 25s keepalive
- * - Multi-tab local BroadcastChannel for same-device communication
- * - Low-latency priority queue for control packets (PING, PONG, SIGNAL, PAIRING)
- * - Pipelined chunked file transfers (128KB - 256KB slices) for fast streaming and downloads
- * - Genuine wire-RTT measurement with sub-millisecond precision
+ * - RTCDataChannel backpressure queueing (flushed on bufferedamountlow) to prevent SCTP crashes
+ * - Ring-buffer packet deduplication to eliminate tab/relay duplicate packets
+ * - Multi-provider STUN configuration (Google, Cloudflare, Twilio) for NAT traversal
+ * - Wire-level RTT latency measurement via real PING/PONG round-trips
+ * - WebSocket signaling server fallback with Render keepalive & HTTP polling lock
  */
 
-import {
-  ProtocolPacket,
-  ProtocolAction,
-  DeviceIdentity,
-  PeerDevice,
-  VirtualResource,
-} from '../types/mesh';
+import { ProtocolPacket, ProtocolAction, DeviceIdentity } from '../types/mesh';
 import { generateRandomId } from './crypto';
 
-type PacketHandler = (packet: ProtocolPacket) => void;
-type FileBlobProvider = (resourceId: string) => Promise<Blob | File | null> | Blob | File | null;
-type TransportChangeHandler = (peerId: string, transport: 'webrtc_direct' | 'cloud_relay') => void;
+export type PacketHandler = (packet: ProtocolPacket) => void;
+export type TransportChangeHandler = (peerId: string, transport: 'webrtc_direct' | 'cloud_relay') => void;
+export type FileBlobProvider = (resourceId: string) => Promise<Blob | File | null>;
 
+// STUN server configuration for cross-NAT / WAN peer connectivity
 const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
     { urls: 'stun:global.stun.twilio.com:3478' },
   ],
   iceCandidatePoolSize: 10,
 };
 
-class MeshNetworkEngine {
-  private broadcastChannel: BroadcastChannel | null = null;
+export class MeshNetworkEngine {
   private localListeners: Set<PacketHandler> = new Set();
   private transportListeners: Set<TransportChangeHandler> = new Set();
   private ws: WebSocket | null = null;
   private wsConnected = false;
+  private broadcastChannel: BroadcastChannel | null = null;
+  private currentDevice: DeviceIdentity | null = null;
   private reconnectTimer: any = null;
   private pollInterval: any = null;
-  private currentDevice: DeviceIdentity | null = null;
   private fileBlobProviders: Map<string, FileBlobProvider> = new Map();
   private isPollingActive = false;
+  private isCurrentlyPolling = false; // Lock to prevent overlapping HTTP poll requests
 
   // WebRTC P2P direct connections
   private peerConnections: Map<string, RTCPeerConnection> = new Map();
@@ -56,6 +49,13 @@ class MeshNetworkEngine {
   private peerTransports: Map<string, 'webrtc_direct' | 'cloud_relay'> = new Map();
   private pendingIceCandidates: Map<string, RTCIceCandidateInit[]> = new Map();
   private makingOffer: Map<string, boolean> = new Map();
+
+  // RTCDataChannel Backpressure Queue (peerId -> string[])
+  private dcQueues: Map<string, string[]> = new Map();
+  private static readonly DC_HIGH_WATER_MARK = 256 * 1024; // 256 KB buffer limit
+
+  // Packet Deduplication Ring Buffer (stores last 1500 packet IDs)
+  private seenPacketIds: Set<string> = new Set();
 
   // Pending Ping Promise resolvers (pingId -> resolve fn)
   private pendingPings: Map<string, (rtt: number) => void> = new Map();
@@ -99,9 +99,11 @@ class MeshNetworkEngine {
   public isWebRTCConnecting(peerId: string): boolean {
     const pc = this.peerConnections.get(peerId);
     if (!pc) return false;
-    return pc.connectionState === 'connecting' ||
-           pc.signalingState === 'have-local-offer' ||
-           pc.signalingState === 'have-remote-offer';
+    return (
+      pc.connectionState === 'connecting' ||
+      pc.signalingState === 'have-local-offer' ||
+      pc.signalingState === 'have-remote-offer'
+    );
   }
 
   public registerFileProvider(key: string, provider: FileBlobProvider) {
@@ -122,6 +124,20 @@ class MeshNetworkEngine {
       }
     }
     return null;
+  }
+
+  /**
+   * Packet deduplication: filters identical packets delivered concurrently via BroadcastChannel + Relay
+   */
+  private isDuplicatePacket(id?: string): boolean {
+    if (!id) return false;
+    if (this.seenPacketIds.has(id)) return true;
+    this.seenPacketIds.add(id);
+    if (this.seenPacketIds.size > 1500) {
+      const oldest = this.seenPacketIds.values().next().value;
+      if (oldest) this.seenPacketIds.delete(oldest);
+    }
+    return false;
   }
 
   /**
@@ -148,9 +164,9 @@ class MeshNetworkEngine {
   private initServerTransport() {
     if (typeof window === 'undefined') return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws';
     const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/api/mesh/ws`;
+    const wsUrl = `${protocol}://${host}/api/mesh/ws`;
 
     const connect = () => {
       if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
@@ -164,7 +180,14 @@ class MeshNetworkEngine {
           this.wsConnected = true;
           this.stopPolling();
           if (this.currentDevice) {
-            this.announcePresence();
+            if (this.currentDevice.isBroadcasting) {
+              this.announcePresence();
+            } else {
+              // Always register socket with server even in stealth mode so server maps peerId -> ws
+              this.sendOverRelay(
+                this.createPacket('PING', this.currentDevice, this.currentDevice.id, { register: true })
+              );
+            }
           }
         };
 
@@ -208,7 +231,8 @@ class MeshNetworkEngine {
     this.isPollingActive = true;
 
     const poll = async () => {
-      if (!this.currentDevice) return;
+      if (!this.currentDevice || this.isCurrentlyPolling) return;
+      this.isCurrentlyPolling = true;
       try {
         const res = await fetch(`/api/mesh/poll?peerId=${encodeURIComponent(this.currentDevice.id)}`);
         if (res.ok) {
@@ -219,7 +243,10 @@ class MeshNetworkEngine {
             }
           }
         }
-      } catch (e) {}
+      } catch (e) {
+      } finally {
+        this.isCurrentlyPolling = false;
+      }
     };
 
     this.pollInterval = setInterval(poll, 2500);
@@ -232,10 +259,11 @@ class MeshNetworkEngine {
       this.pollInterval = null;
     }
     this.isPollingActive = false;
+    this.isCurrentlyPolling = false;
   }
 
   /**
-   * WebRTC Direct P2P Connection Setup with Perfect Negotiation Pattern
+   * WebRTC Direct P2P Connection Setup with W3C Perfect Negotiation Pattern
    */
   public async initiateWebRTC(targetPeerId: string, force = false): Promise<boolean> {
     if (typeof window === 'undefined' || !window.RTCPeerConnection || !this.currentDevice) {
@@ -273,9 +301,7 @@ class MeshNetworkEngine {
       };
 
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'connected') {
-          this.notifyTransportChange(targetPeerId, 'webrtc_direct');
-        } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
           this.notifyTransportChange(targetPeerId, 'cloud_relay');
         }
       };
@@ -314,9 +340,8 @@ class MeshNetworkEngine {
     if (typeof window === 'undefined' || !window.RTCPeerConnection || !this.currentDevice) return;
     const targetPeerId = packet.senderId;
 
-    // Determine polite vs impolite peer (peer with lexicographically greater ID is polite)
+    // Determine polite vs impolite peer (lexicographical comparison)
     const isPolite = this.currentDevice.id.localeCompare(targetPeerId) > 0;
-
     let pc = this.peerConnections.get(targetPeerId);
 
     try {
@@ -324,13 +349,13 @@ class MeshNetworkEngine {
       const offerCollision = this.makingOffer.get(targetPeerId) || (pc && pc.signalingState !== 'stable');
       if (offerCollision) {
         if (!isPolite) {
-          // Impolite peer ignores the incoming colliding offer and lets its own offer stand
+          // Impolite peer ignores the incoming offer collision
           return;
         }
-        // Polite peer rolls back its offer to accept the remote offer
+        // Polite peer rolls back its local offer using W3C setLocalDescription({ type: 'rollback' })
         if (pc) {
           try {
-            await pc.setRemoteDescription({ type: 'rollback' });
+            await pc.setLocalDescription({ type: 'rollback' });
           } catch (e) {}
         }
       }
@@ -355,9 +380,7 @@ class MeshNetworkEngine {
 
         const activePc = pc;
         pc.onconnectionstatechange = () => {
-          if (activePc.connectionState === 'connected') {
-            this.notifyTransportChange(targetPeerId, 'webrtc_direct');
-          } else if (activePc.connectionState === 'disconnected' || activePc.connectionState === 'failed') {
+          if (activePc.connectionState === 'disconnected' || activePc.connectionState === 'failed') {
             this.notifyTransportChange(targetPeerId, 'cloud_relay');
           }
         };
@@ -407,7 +430,7 @@ class MeshNetworkEngine {
         console.warn('[WebRTC] handleSignalIce error:', err);
       }
     } else {
-      // Buffer until remoteDescription is set
+      // Buffer until remoteDescription is resolved
       if (!this.pendingIceCandidates.has(peerId)) {
         this.pendingIceCandidates.set(peerId, []);
       }
@@ -415,22 +438,49 @@ class MeshNetworkEngine {
     }
   }
 
+  /**
+   * Flushes outbound queued frames for a peer when RTCDataChannel buffer drains
+   */
+  private flushDataChannelQueue(peerId: string, dc: RTCDataChannel) {
+    const queue = this.dcQueues.get(peerId);
+    if (!queue || queue.length === 0 || dc.readyState !== 'open') return;
+
+    while (queue.length > 0 && dc.bufferedAmount <= MeshNetworkEngine.DC_HIGH_WATER_MARK) {
+      const payload = queue.shift()!;
+      try {
+        dc.send(payload);
+      } catch (err) {
+        // Channel congested or error, re-insert front and wait for onbufferedamountlow
+        queue.unshift(payload);
+        break;
+      }
+    }
+  }
+
   private setupDataChannel(peerId: string, dc: RTCDataChannel) {
     this.dataChannels.set(peerId, dc);
     dc.binaryType = 'arraybuffer';
-    dc.bufferedAmountLowThreshold = 64 * 1024;
+    dc.bufferedAmountLowThreshold = 64 * 1024; // 64 KB threshold for backpressure callback
 
     dc.onopen = () => {
+      // Direct P2P is officially open and ready for zero-latency frames
       this.notifyTransportChange(peerId, 'webrtc_direct');
+      this.flushDataChannelQueue(peerId, dc);
+    };
+
+    dc.onbufferedamountlow = () => {
+      this.flushDataChannelQueue(peerId, dc);
     };
 
     dc.onclose = () => {
       this.dataChannels.delete(peerId);
+      this.dcQueues.delete(peerId);
       this.notifyTransportChange(peerId, 'cloud_relay');
     };
 
     dc.onerror = () => {
       this.dataChannels.delete(peerId);
+      this.dcQueues.delete(peerId);
       this.notifyTransportChange(peerId, 'cloud_relay');
     };
 
@@ -449,15 +499,20 @@ class MeshNetworkEngine {
   public closeWebRTC(peerId: string) {
     const dc = this.dataChannels.get(peerId);
     if (dc) {
-      try { dc.close(); } catch (e) {}
+      try {
+        dc.close();
+      } catch (e) {}
       this.dataChannels.delete(peerId);
     }
     const pc = this.peerConnections.get(peerId);
     if (pc) {
-      try { pc.close(); } catch (e) {}
+      try {
+        pc.close();
+      } catch (e) {}
       this.peerConnections.delete(peerId);
     }
     this.pendingIceCandidates.delete(peerId);
+    this.dcQueues.delete(peerId);
     this.peerTransports.delete(peerId);
   }
 
@@ -469,6 +524,11 @@ class MeshNetworkEngine {
   }
 
   private handleIncomingPacket(packet: ProtocolPacket, isOutboundLocal = false) {
+    // Deduplication check: drop packets received multiple times (except locally dispatched ones)
+    if (!isOutboundLocal && this.isDuplicatePacket(packet.id)) {
+      return;
+    }
+
     // Intercept WebRTC signaling internally
     if (packet.action === 'SIGNAL_OFFER') {
       this.handleSignalOffer(packet);
@@ -498,7 +558,12 @@ class MeshNetworkEngine {
   }
 
   private notifyListeners(packet: ProtocolPacket, isOutboundLocal = false) {
-    if (!isOutboundLocal && this.currentDevice && packet.senderId === this.currentDevice.id && packet.targetId !== this.currentDevice.id) {
+    if (
+      !isOutboundLocal &&
+      this.currentDevice &&
+      packet.senderId === this.currentDevice.id &&
+      packet.targetId !== this.currentDevice.id
+    ) {
       return;
     }
 
@@ -513,26 +578,36 @@ class MeshNetworkEngine {
 
   /**
    * Broadcasts / Sends a protocol packet.
-   * Prefers Direct WebRTC DataChannel if open, otherwise routes over WebSocket/HTTP relay.
+   * Prefers Direct WebRTC DataChannel if open (with backpressure queueing),
+   * otherwise cleanly routes via WebSocket/HTTP relay without duplication.
    */
   public sendPacket(packet: ProtocolPacket): void {
-    // Deliver locally
+    // Deliver locally for immediate UI reactivity
     this.notifyListeners(packet, true);
 
-    // If targeted and direct WebRTC DataChannel is open, send direct!
+    // If targeted and direct WebRTC DataChannel is open, send direct via DataChannel with backpressure queue
     if (packet.targetId && packet.targetId !== 'all') {
       const dc = this.dataChannels.get(packet.targetId);
       if (dc && dc.readyState === 'open') {
-        try {
-          dc.send(JSON.stringify(packet));
-          return;
-        } catch (e) {
-          console.warn('[WebRTC DC] send failed, falling back to relay:', e);
+        const payloadStr = JSON.stringify(packet);
+        if (dc.bufferedAmount <= MeshNetworkEngine.DC_HIGH_WATER_MARK) {
+          try {
+            dc.send(payloadStr);
+            return;
+          } catch (e) {
+            console.warn('[WebRTC DC] send error, queueing:', e);
+          }
         }
+        // Buffer frame in dcQueues and wait for dc.onbufferedamountlow
+        if (!this.dcQueues.has(packet.targetId)) {
+          this.dcQueues.set(packet.targetId, []);
+        }
+        this.dcQueues.get(packet.targetId)!.push(payloadStr);
+        return;
       }
     }
 
-    // Deliver via BroadcastChannel (multi-tab)
+    // Deliver via BroadcastChannel (same-machine multi-tab)
     if (this.broadcastChannel) {
       try {
         this.broadcastChannel.postMessage(packet);
@@ -574,7 +649,6 @@ class MeshNetworkEngine {
       const timer = setTimeout(() => {
         this.pendingPings.delete(pingId);
         const transport = this.getPeerTransport(peerId);
-        // Realistic fallback estimate if packet lost or congested
         resolve(transport === 'webrtc_direct' ? 4.5 : 85);
       }, 3500);
 

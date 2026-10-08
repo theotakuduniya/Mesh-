@@ -2,8 +2,6 @@
  * MESH: Local-First Peer-to-Peer Collaboration Types
  */
 
-export type PlatformOS = 'Windows 11' | 'macOS Sequoia' | 'Ubuntu Linux' | 'Windows 10';
-
 export interface DeviceIdentity {
   id: string; // e.g. "mesh-node-alpha"
   name: string; // e.g. "Workstation-Alpha"
@@ -86,6 +84,8 @@ export interface SharedFolder {
   resources: VirtualResource[];
 }
 
+export type PlatformOS = 'Windows 11' | 'macOS Sequoia' | 'Ubuntu Linux' | 'Windows 10' | 'Android' | 'iOS' | 'Linux';
+
 export type ProtocolAction = 
   | 'DISCOVER'
   | 'PAIR_REQUEST'
@@ -97,6 +97,7 @@ export type ProtocolAction =
   | 'CHUNK_DATA'
   | 'CHUNK_REQUEST'
   | 'DOWNLOAD_REQUEST'
+  | 'TRANSFER_CONTROL'
   | 'STREAM_REQUEST'
   | 'STREAM_DATA'
   | 'SIGNAL_OFFER'
@@ -109,6 +110,52 @@ export type ProtocolAction =
   | 'PING'
   | 'PONG'
   | 'REVOKE_ACCESS';
+
+export interface TransferControlPayload {
+  transferId: string;
+  control: 'pause' | 'resume' | 'cancel';
+  reason?: string;
+}
+
+export interface ChunkRequestPayload {
+  transferId: string;
+  resourceId: string;
+  chunkIndex: number;
+  chunkSize: number;
+  totalChunks: number;
+}
+
+export interface ChunkDataPayload {
+  transferId: string;
+  resourceId: string;
+  chunkIndex: number;
+  totalChunks: number;
+  chunkSize: number;
+  actualFileSizeBytes?: number;
+  dataBase64: string;
+  isLast: boolean;
+  actualTotalChunks?: number;
+}
+
+export interface StreamRequestPayload {
+  sessionId: string;
+  resourceId: string;
+  rangeOffsetBytes: number;
+  byteLength?: number;
+  seekSeconds?: number;
+}
+
+export interface StreamDataPayload {
+  sessionId: string;
+  resourceId: string;
+  chunkIndex: number;
+  totalBurstChunks: number;
+  rangeOffsetBytes: number;
+  totalBytes: number;
+  mimeType: string;
+  dataBase64: string;
+  isEof?: boolean;
+}
 
 export interface ProtocolPacket {
   id: string;
@@ -130,6 +177,9 @@ export interface TransferSession {
   chunkSize: number;
   totalChunks: number;
   currentChunk: number;
+  highestRequestedChunk?: number;
+  receivedChunkCount?: number;
+  transportType?: 'webrtc_direct' | 'cloud_relay' | 'local_bus';
   speedMbps: number;
   direction: 'downloading' | 'uploading';
   peerId: string;
@@ -150,9 +200,10 @@ export interface StreamSession {
   mimeType: string;
   totalSizeBytes: number;
   bufferedBytes: number;
+  rangeOffsetBytes?: number;
   currentPositionSeconds: number;
   durationSeconds: number;
-  status: 'streaming' | 'buffering' | 'paused' | 'ended';
+  status: 'streaming' | 'buffering' | 'paused' | 'ended' | 'error';
   requestCount: number;
   speedKbps: number;
   mediaUrl?: string;

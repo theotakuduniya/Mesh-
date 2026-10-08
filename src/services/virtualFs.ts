@@ -25,7 +25,7 @@ export const INITIAL_SHARED_FOLDERS_PC_A: SharedFolder[] = [
     label: 'College Coursework',
     realSourceAlias: 'Local Volume (D:) -> Documents/University/Fall2026',
     resourceCount: 2,
-    totalSizeBytes: 318000000, // ~318 MB
+    totalSizeBytes: 12240000, // 4.82 MB + 7.42 MB = 12.24 MB
     permissions: {
       canView: true,
       canPreview: true,
@@ -74,7 +74,7 @@ export const INITIAL_SHARED_FOLDERS_PC_A: SharedFolder[] = [
     label: 'Lecture Media & Recordings',
     realSourceAlias: 'Local Volume (C:) -> Users/Alex/Videos/Recordings',
     resourceCount: 2,
-    totalSizeBytes: 1845000000, // ~1.84 GB
+    totalSizeBytes: 438500000, // 420 MB + 18.5 MB = 438.5 MB
     permissions: {
       canView: true,
       canPreview: true,
@@ -125,7 +125,7 @@ export const INITIAL_SHARED_FOLDERS_PC_A: SharedFolder[] = [
     label: 'Engineering Projects',
     realSourceAlias: 'Local Volume (D:) -> Code/ActiveProjects',
     resourceCount: 2,
-    totalSizeBytes: 24500000, // 24.5 MB
+    totalSizeBytes: 14242000, // 14.2 MB + 42 KB = ~14.242 MB
     permissions: {
       canView: true,
       canPreview: true,
@@ -177,7 +177,7 @@ export const INITIAL_SHARED_FOLDERS_PC_B: SharedFolder[] = [
     label: 'Distributed Systems Papers',
     realSourceAlias: 'Macintosh HD -> Users/Jordan/Documents/Research',
     resourceCount: 2,
-    totalSizeBytes: 18500000,
+    totalSizeBytes: 7450000, // 6.2 MB + 1.25 MB = 7.45 MB
     permissions: {
       canView: true,
       canPreview: true,
@@ -223,6 +223,49 @@ export const INITIAL_SHARED_FOLDERS_PC_B: SharedFolder[] = [
 ];
 
 /**
+ * Synchronizes folder resource count and total size metrics to match exact resource sum
+ */
+export function syncFolderMetrics(folder: SharedFolder): SharedFolder {
+  const resourceCount = folder.resources.length;
+  const totalSizeBytes = folder.resources.reduce((sum, res) => sum + (res.sizeBytes || 0), 0);
+  return {
+    ...folder,
+    resourceCount,
+    totalSizeBytes,
+  };
+}
+
+/**
+ * Sanitizes folders before sending over the wire to remote peers:
+ * - Masks local filesystem paths (realSourceAlias: 'Virtual Shared Volume')
+ * - Strips memory-heavy realFileBlob
+ * - Strips huge data/blob previewUrls to prevent wire bufferbloat
+ */
+export function sanitizeFoldersForWire(folders: SharedFolder[]): SharedFolder[] {
+  return folders.map((folder) => {
+    const synced = syncFolderMetrics(folder);
+    return {
+      ...synced,
+      realSourceAlias: 'Virtual Shared Volume',
+      resources: synced.resources.map((res) => {
+        let cleanPreviewUrl = res.previewUrl;
+        if (cleanPreviewUrl) {
+          // Strip large base64 or blob URLs that would choke signaling or be invalid on remote nodes
+          if (cleanPreviewUrl.startsWith('blob:') || cleanPreviewUrl.length > 32 * 1024) {
+            cleanPreviewUrl = undefined;
+          }
+        }
+        return {
+          ...res,
+          realFileBlob: undefined,
+          previewUrl: cleanPreviewUrl,
+        };
+      }),
+    };
+  });
+}
+
+/**
  * Validates whether a requested action is allowed under the current permission set.
  */
 export function verifyPermission(
@@ -231,6 +274,11 @@ export function verifyPermission(
 ): { allowed: boolean; reason?: string } {
   if (permissions.expiresAt && Date.now() > permissions.expiresAt) {
     return { allowed: false, reason: 'Temporary authorization window has expired' };
+  }
+
+  // If view permission is false, deny all access immediately
+  if (!permissions.canView) {
+    return { allowed: false, reason: 'Folder visibility revoked' };
   }
 
   switch (action) {

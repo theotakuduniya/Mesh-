@@ -28,7 +28,33 @@ async function startServer() {
 
   const peers = new Map<string, ConnectedPeer>();
   const packetQueues = new Map<string, any[]>(); // targetPeerId -> packets[]
-  const MAX_QUEUE_SIZE = 100;
+  const MAX_QUEUE_SIZE = 500;
+  const WS_MAX_BUFFERED = 4 * 1024 * 1024; // 4 MB socket backpressure limit
+
+  // Helper to push into queue with priority signaling preservation
+  const enqueuePacket = (targetId: string, packet: any) => {
+    if (!packetQueues.has(targetId)) {
+      packetQueues.set(targetId, []);
+    }
+    const queue = packetQueues.get(targetId)!;
+    queue.push(packet);
+
+    if (queue.length > MAX_QUEUE_SIZE) {
+      // Find oldest non-signaling / non-pairing packet to evict
+      const evictIndex = queue.findIndex(
+        (p) =>
+          p.action !== 'SIGNAL_OFFER' &&
+          p.action !== 'SIGNAL_ANSWER' &&
+          p.action !== 'SIGNAL_ICE' &&
+          !p.action?.startsWith('PAIR_')
+      );
+      if (evictIndex !== -1) {
+        queue.splice(evictIndex, 1);
+      } else {
+        queue.shift();
+      }
+    }
+  };
 
   // Real-time WebSocket signaling server with 100MB payload support & Render keepalive
   const wss = new WebSocketServer({
@@ -62,8 +88,23 @@ async function startServer() {
 
     let peerId: string | null = null;
 
-    ws.on('message', (raw: any) => {
+    ws.on('message', (raw: any, isBinary: boolean) => {
       try {
+        // High-performance binary frame passthrough:
+        // First 36 bytes can represent target UUID (or 'all' padded).
+        if (isBinary && Buffer.isBuffer(raw)) {
+          if (raw.length >= 36) {
+            const targetIdHeader = raw.subarray(0, 36).toString('utf8').replace(/\0/g, '').trim();
+            if (targetIdHeader && targetIdHeader !== 'all') {
+              const target = peers.get(targetIdHeader);
+              if (target?.ws && target.ws.readyState === WebSocket.OPEN && target.ws.bufferedAmount < WS_MAX_BUFFERED) {
+                target.ws.send(raw, { binary: true });
+                return;
+              }
+            }
+          }
+        }
+
         const text = raw.toString();
         const packet = JSON.parse(text);
 
@@ -71,12 +112,20 @@ async function startServer() {
           peerId = packet.senderId;
           const currentId: string = packet.senderId;
           const existing = peers.get(currentId);
+
+          // Crucial fix: Only update peer metadata when packet.action === 'DISCOVER'
+          // Never overwrite metadata with large file chunks, SDP offers, or streams!
+          const updatedMetadata =
+            packet.action === 'DISCOVER' && packet.payload
+              ? packet.payload
+              : existing?.metadata || { id: currentId, name: packet.senderName };
+
           peers.set(currentId, {
             id: currentId,
             name: packet.senderName || existing?.name || 'Mesh Peer',
             ws,
             lastSeen: Date.now(),
-            metadata: packet.payload,
+            metadata: updatedMetadata,
           });
         }
 
@@ -87,10 +136,12 @@ async function startServer() {
           // Broadcast to all other connected clients
           for (const [id, peer] of peers.entries()) {
             if (id !== peerId && peer.ws && peer.ws.readyState === WebSocket.OPEN) {
-              try {
-                peer.ws.send(text);
-              } catch (e) {
-                console.warn(`[Mesh WS] Broadcast to ${id} failed:`, e);
+              if (peer.ws.bufferedAmount < WS_MAX_BUFFERED) {
+                try {
+                  peer.ws.send(text);
+                } catch (e) {
+                  console.warn(`[Mesh WS] Broadcast to ${id} failed:`, e);
+                }
               }
             }
           }
@@ -98,19 +149,19 @@ async function startServer() {
           // Targeted unicast
           const target = peers.get(targetId);
           if (target?.ws && target.ws.readyState === WebSocket.OPEN) {
-            try {
-              target.ws.send(text);
-            } catch (e) {
-              console.warn(`[Mesh WS] Send to ${targetId} failed:`, e);
+            if (target.ws.bufferedAmount < WS_MAX_BUFFERED) {
+              try {
+                target.ws.send(text);
+              } catch (e) {
+                console.warn(`[Mesh WS] Send to ${targetId} failed:`, e);
+              }
+            } else {
+              // Socket is backpressured, queue packet with priority retention
+              enqueuePacket(targetId, packet);
             }
           } else {
             // Queue for HTTP polling or when target reconnects
-            if (!packetQueues.has(targetId)) {
-              packetQueues.set(targetId, []);
-            }
-            const queue = packetQueues.get(targetId)!;
-            queue.push(packet);
-            if (queue.length > MAX_QUEUE_SIZE) queue.shift();
+            enqueuePacket(targetId, packet);
           }
         }
       } catch (err) {
@@ -134,7 +185,7 @@ async function startServer() {
             payload: { id: peerId, isOnline: false },
           });
           for (const [_, p] of peers.entries()) {
-            if (p.ws && p.ws.readyState === WebSocket.OPEN) {
+            if (p.ws && p.ws.readyState === WebSocket.OPEN && p.ws.bufferedAmount < WS_MAX_BUFFERED) {
               try {
                 p.ws.send(offlineNotice);
               } catch (e) {}
@@ -169,11 +220,16 @@ async function startServer() {
     const senderId = packet.senderId;
     if (senderId) {
       const existing = peers.get(senderId);
+      const updatedMetadata =
+        packet.action === 'DISCOVER' && packet.payload
+          ? packet.payload
+          : existing?.metadata || { id: senderId, name: packet.senderName };
+
       peers.set(senderId, {
         id: senderId,
         name: packet.senderName || existing?.name || 'Mesh Peer',
         lastSeen: Date.now(),
-        metadata: packet.payload,
+        metadata: updatedMetadata,
       });
     }
 
@@ -184,29 +240,29 @@ async function startServer() {
       // Forward to all WebSocket clients
       for (const [id, peer] of peers.entries()) {
         if (id !== senderId && peer.ws && peer.ws.readyState === WebSocket.OPEN) {
-          try {
-            peer.ws.send(text);
-          } catch (e) {}
+          if (peer.ws.bufferedAmount < WS_MAX_BUFFERED) {
+            try {
+              peer.ws.send(text);
+            } catch (e) {}
+          }
         }
         // Also queue for HTTP pollers
         if (id !== senderId) {
-          if (!packetQueues.has(id)) packetQueues.set(id, []);
-          const q = packetQueues.get(id)!;
-          q.push(packet);
-          if (q.length > MAX_QUEUE_SIZE) q.shift();
+          enqueuePacket(id, packet);
         }
       }
     } else {
       const target = peers.get(targetId);
       if (target?.ws && target.ws.readyState === WebSocket.OPEN) {
-        try {
-          target.ws.send(text);
-        } catch (e) {}
+        if (target.ws.bufferedAmount < WS_MAX_BUFFERED) {
+          try {
+            target.ws.send(text);
+          } catch (e) {}
+        } else {
+          enqueuePacket(targetId, packet);
+        }
       } else {
-        if (!packetQueues.has(targetId)) packetQueues.set(targetId, []);
-        const q = packetQueues.get(targetId)!;
-        q.push(packet);
-        if (q.length > MAX_QUEUE_SIZE) q.shift();
+        enqueuePacket(targetId, packet);
       }
     }
 

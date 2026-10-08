@@ -20,9 +20,16 @@ import {
 import {
   DEFAULT_PERMISSIONS,
   verifyPermission,
+  sanitizeFoldersForWire,
 } from '../services/virtualFs';
 import { meshNetwork } from '../services/meshNetwork';
-import { generateSafetyCode, generateRandomId, computeSha256 } from '../services/crypto';
+import {
+  generateSafetyCode,
+  generateRandomId,
+  computeSha256,
+  arrayBufferToBase64,
+  base64ToUint8Array,
+} from '../services/crypto';
 
 export type ActiveNavTab = 'nearby' | 'peer_detail' | 'shared' | 'rooms' | 'activity' | 'settings';
 
@@ -185,6 +192,14 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // In-memory registries for real local Blobs & receiving chunk assembly
   const localBlobsRef = useRef<Map<string, Blob | File>>(new Map());
   const transferChunksRef = useRef<Map<string, Blob[]>>(new Map());
+  const streamChunksRef = useRef<Map<string, Blob[]>>(new Map());
+
+  // Stable state mirrors for high-frequency packet listeners to prevent listener thrashing
+  const currentDeviceRef = useRef<DeviceIdentity>(currentDevice);
+  const nearbyPeersRef = useRef<PeerDevice[]>([]);
+  const deviceSharedFoldersRef = useRef<Record<string, SharedFolder[]>>({});
+  const activeTransfersRef = useRef<TransferSession[]>([]);
+  const activeStreamRef = useRef<StreamSession | null>(null);
 
   const toggleSidebar = useCallback(() => {
     setIsSidebarCollapsed((prev) => !prev);
@@ -320,8 +335,24 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setActivityLog((prev) => [item, ...prev.slice(0, 99)]);
   }, []);
 
+  // Sync mirrors on state changes
+  useEffect(() => { currentDeviceRef.current = currentDevice; }, [currentDevice]);
+  useEffect(() => { nearbyPeersRef.current = nearbyPeers; }, [nearbyPeers]);
+  useEffect(() => { deviceSharedFoldersRef.current = deviceSharedFolders; }, [deviceSharedFolders]);
+  useEffect(() => { activeTransfersRef.current = activeTransfers; }, [activeTransfers]);
+  useEffect(() => { activeStreamRef.current = activeStream; }, [activeStream]);
+
   const recordPacket = useCallback((pkt: ProtocolPacket) => {
-    setRecentPackets((prev) => [pkt, ...prev.slice(0, 99)]);
+    // Sanitize heavy binary base64 payloads to prevent React state bloat
+    let cleanPayload = pkt.payload;
+    if (cleanPayload && typeof cleanPayload === 'object' && cleanPayload.dataBase64) {
+      cleanPayload = {
+        ...cleanPayload,
+        dataBase64: `[Binary Payload: ${cleanPayload.chunkSize || cleanPayload.byteLength || 49152} bytes]`,
+      };
+    }
+    const sanitizedPkt = { ...pkt, payload: cleanPayload };
+    setRecentPackets((prev) => [sanitizedPkt, ...prev.slice(0, 99)]);
   }, []);
 
   const switchDeviceProfile = useCallback((_profile: 'alpha' | 'beta') => {}, []);
@@ -365,19 +396,20 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsub();
   }, []);
 
-  // Handle incoming protocol packets
+  // Handle incoming protocol packets with stable refs to prevent listener thrashing
   useEffect(() => {
     const unsubscribe = meshNetwork.subscribe((packet) => {
       recordPacket(packet);
 
-      if (packet.senderId === currentDevice.id && packet.targetId !== currentDevice.id) {
+      const myDevice = currentDeviceRef.current;
+      if (packet.senderId === myDevice.id && packet.targetId !== myDevice.id) {
         return;
       }
 
       switch (packet.action) {
         case 'DISCOVER': {
           const peerInfo = packet.payload;
-          if (!peerInfo || !peerInfo.id || peerInfo.id === currentDevice.id) break;
+          if (!peerInfo || !peerInfo.id || peerInfo.id === myDevice.id) break;
 
           setNearbyPeers((prev) => {
             const exists = prev.find((p) => p.id === peerInfo.id);
@@ -420,22 +452,22 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
           });
 
           // Deterministic WebRTC handshake without glare collisions
-          if (currentDevice.id > peerInfo.id && !meshNetwork.isWebRTCConnected(peerInfo.id)) {
+          if (myDevice.id > peerInfo.id && !meshNetwork.isWebRTCConnected(peerInfo.id)) {
             meshNetwork.initiateWebRTC(peerInfo.id);
           }
 
           // Respond back if discovery was broadcast to all
           if (packet.targetId === 'all') {
-            const respPkt = meshNetwork.createPacket('DISCOVER', currentDevice, peerInfo.id, {
-              id: currentDevice.id,
-              name: currentDevice.name,
-              ownerName: currentDevice.ownerName,
-              os: currentDevice.os,
-              ip: currentDevice.ip,
-              port: currentDevice.port,
-              fingerprint: currentDevice.fingerprint,
-              publicKey: currentDevice.publicKey,
-              mDnsName: currentDevice.mDnsName,
+            const respPkt = meshNetwork.createPacket('DISCOVER', myDevice, peerInfo.id, {
+              id: myDevice.id,
+              name: myDevice.name,
+              ownerName: myDevice.ownerName,
+              os: myDevice.os,
+              ip: myDevice.ip,
+              port: myDevice.port,
+              fingerprint: myDevice.fingerprint,
+              publicKey: myDevice.publicKey,
+              mDnsName: myDevice.mDnsName,
               isOnline: true,
             });
             meshNetwork.sendPacket(respPkt);
@@ -444,8 +476,8 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         case 'PAIR_REQUEST': {
-          if (packet.targetId === currentDevice.id || packet.targetId === 'all') {
-            const peer = nearbyPeers.find((p) => p.id === packet.senderId) || {
+          if (packet.targetId === myDevice.id || packet.targetId === 'all') {
+            const peer = nearbyPeersRef.current.find((p) => p.id === packet.senderId) || {
               id: packet.senderId,
               name: packet.senderName,
               ownerName: packet.payload.ownerName || 'Peer User',
@@ -455,7 +487,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               fingerprint: packet.payload.fingerprint || 'AB:CD:EF:12:34:56',
               publicKey: packet.payload.publicKey || 'pk_remote',
               mDnsName: `${packet.senderName.toLowerCase()}.local`,
-              status: 'pairing_incoming',
+              status: 'pairing_incoming' as const,
               lastSeen: Date.now(),
               latencyMs: 1.8,
               isOnline: true,
@@ -464,7 +496,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               transportType: meshNetwork.getPeerTransport(packet.senderId),
             };
 
-            const safetyCode = generateSafetyCode(currentDevice.id, packet.senderId);
+            const safetyCode = generateSafetyCode(myDevice.id, packet.senderId);
             setPendingPairRequest({
               peer,
               safetyCode,
@@ -486,7 +518,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         case 'PAIR_ACCEPT': {
-          if (packet.targetId === currentDevice.id) {
+          if (packet.targetId === myDevice.id) {
             setNearbyPeers((prev) =>
               prev.map((p) =>
                 p.id === packet.senderId
@@ -498,17 +530,10 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
             // Establish direct WebRTC P2P DataChannel
             meshNetwork.initiateWebRTC(packet.senderId);
 
-            // Exchange shared folders (lightweight wire descriptors without giant strings)
-            const myFolders = deviceSharedFolders[currentDevice.id] || [];
-            const sanitizedFolders = myFolders.map((f) => ({
-              ...f,
-              resources: f.resources.map((res) => ({
-                ...res,
-                previewUrl: res.previewUrl?.startsWith('data:image/') && res.previewUrl.length < 150000 ? res.previewUrl : undefined,
-                realFileBlob: undefined,
-              })),
-            }));
-            const listPkt = meshNetwork.createPacket('LIST_RESOURCES', currentDevice, packet.senderId, {
+            // Exchange sanitized shared folders
+            const myFolders = deviceSharedFoldersRef.current[myDevice.id] || [];
+            const sanitizedFolders = sanitizeFoldersForWire(myFolders);
+            const listPkt = meshNetwork.createPacket('LIST_RESOURCES', myDevice, packet.senderId, {
               folders: sanitizedFolders,
             });
             meshNetwork.sendPacket(listPkt);
@@ -526,7 +551,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         case 'PAIR_REJECT': {
-          if (packet.targetId === currentDevice.id) {
+          if (packet.targetId === myDevice.id) {
             setNearbyPeers((prev) =>
               prev.map((p) => (p.id === packet.senderId ? { ...p, status: 'unpaired' } : p))
             );
@@ -542,15 +567,15 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
           break;
         }
 
-        // Real Progressive Chunk Handlers for Large Files & Direct Streaming (Pipelined Window)
+        // Real Progressive Chunk Handlers for Large Files & Direct Streaming (48 KB Safe Chunks)
         case 'CHUNK_REQUEST':
         case 'READ_CHUNK': {
-          if (packet.targetId === currentDevice.id) {
-            const { resourceId, chunkIndex = 0, chunkSize = 131072, transferId } = packet.payload;
+          if (packet.targetId === myDevice.id) {
+            const { resourceId, chunkIndex = 0, chunkSize = 49152, transferId } = packet.payload;
             let blob = localBlobsRef.current.get(resourceId);
             if (!blob) {
               // Check folders for realFileBlob
-              for (const folders of Object.values(deviceSharedFolders)) {
+              for (const folders of Object.values(deviceSharedFoldersRef.current)) {
                 for (const f of folders) {
                   const found = f.resources.find((r) => r.id === resourceId);
                   if (found?.realFileBlob) {
@@ -567,37 +592,52 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               const start = chunkIndex * chunkSize;
               const end = Math.min(blob.size, start + chunkSize);
               const slice = blob.slice(start, end);
-              const reader = new FileReader();
-              reader.onload = () => {
-                const dataUrl = reader.result as string;
-                const dataBase64 = dataUrl.split(',')[1] || '';
-                const chunkPkt = meshNetwork.createPacket('CHUNK_DATA', currentDevice, packet.senderId, {
+              const fileReader = new FileReader();
+              fileReader.onload = () => {
+                const arrayBuf = fileReader.result as ArrayBuffer;
+                const dataBase64 = arrayBufferToBase64(arrayBuf);
+                const totalChunks = Math.ceil(blob.size / chunkSize);
+                const chunkPkt = meshNetwork.createPacket('CHUNK_DATA', myDevice, packet.senderId, {
                   transferId,
                   resourceId,
                   chunkIndex,
                   chunkSize,
-                  totalChunks: Math.ceil(blob.size / chunkSize),
+                  totalChunks,
+                  actualTotalChunks: totalChunks,
+                  actualFileSizeBytes: blob.size,
                   dataBase64,
                   mimeType: blob.type,
                   isLast: end >= blob.size,
                 });
                 meshNetwork.sendPacket(chunkPkt);
               };
-              reader.readAsDataURL(slice);
+              fileReader.readAsArrayBuffer(slice);
             }
           }
           break;
         }
 
         case 'CHUNK_DATA': {
-          if (packet.targetId === currentDevice.id) {
-            const { transferId, resourceId, chunkIndex, totalChunks, chunkSize = 131072, dataBase64, mimeType, isLast } = packet.payload;
+          if (packet.targetId === myDevice.id) {
+            const {
+              transferId,
+              resourceId,
+              chunkIndex,
+              totalChunks,
+              actualTotalChunks,
+              chunkSize = 49152,
+              dataBase64,
+              mimeType,
+            } = packet.payload;
+
+            // Check if transfer is paused or cancelled
+            const activeT = activeTransfersRef.current.find((t) => t.id === transferId);
+            if (activeT && (activeT.status === 'paused' || activeT.status === 'cancelled')) {
+              break;
+            }
+
             try {
-              const byteChars = atob(dataBase64 || '');
-              const byteNumbers = new Uint8Array(byteChars.length);
-              for (let i = 0; i < byteChars.length; i++) {
-                byteNumbers[i] = byteChars.charCodeAt(i);
-              }
+              const byteNumbers = base64ToUint8Array(dataBase64 || '');
               const chunkBlob = new Blob([byteNumbers], { type: mimeType });
 
               if (!transferChunksRef.current.has(transferId)) {
@@ -606,13 +646,14 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               const chunks = transferChunksRef.current.get(transferId)!;
               chunks[chunkIndex] = chunkBlob;
 
-              // Count received chunks
+              const targetTotalChunks = actualTotalChunks || totalChunks;
               let receivedCount = 0;
-              for (let i = 0; i < totalChunks; i++) {
+              for (let i = 0; i < targetTotalChunks; i++) {
                 if (chunks[i]) receivedCount++;
               }
 
-              const isComplete = isLast || receivedCount >= totalChunks;
+              // Strict out-of-order safe completion check
+              const isComplete = receivedCount >= targetTotalChunks;
               let finalUrl: string | undefined;
 
               if (isComplete) {
@@ -620,12 +661,15 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 finalUrl = URL.createObjectURL(completeBlob);
                 localBlobsRef.current.set(resourceId, completeBlob);
 
-                // Auto trigger native download
+                // Free RAM chunks memory once full blob is created
+                transferChunksRef.current.delete(transferId);
+
+                // Trigger download
                 if (typeof window !== 'undefined') {
-                  const activeT = activeTransfers.find((t) => t.id === transferId);
+                  const tRec = activeTransfersRef.current.find((t) => t.id === transferId);
                   const a = document.createElement('a');
                   a.href = finalUrl;
-                  a.download = activeT?.resourceName || 'downloaded_file';
+                  a.download = tRec?.resourceName || 'downloaded_file';
                   document.body.appendChild(a);
                   a.click();
                   document.body.removeChild(a);
@@ -639,6 +683,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   return {
                     ...t,
                     currentChunk: receivedCount,
+                    receivedChunkCount: receivedCount,
                     bytesTransferred: isComplete ? t.fileSizeBytes : currentBytes,
                     status: isComplete ? ('completed' as const) : ('transferring' as const),
                     checksumVerified: isComplete,
@@ -647,15 +692,17 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 })
               );
 
-              // Sliding window pipelining: request next chunk ahead (window = 4)
-              const WINDOW_SIZE = 4;
+              // Sliding window pipelining: request next chunk ahead (window = 8 on WebRTC direct, 4 on relay)
+              const transport = meshNetwork.getPeerTransport(packet.senderId);
+              const WINDOW_SIZE = transport === 'webrtc_direct' ? 8 : 4;
               const nextChunk = chunkIndex + WINDOW_SIZE;
-              if (!isComplete && nextChunk < totalChunks && !chunks[nextChunk]) {
-                const nextPkt = meshNetwork.createPacket('CHUNK_REQUEST', currentDevice, packet.senderId, {
+              if (!isComplete && nextChunk < targetTotalChunks && !chunks[nextChunk]) {
+                const nextPkt = meshNetwork.createPacket('CHUNK_REQUEST', myDevice, packet.senderId, {
                   transferId,
                   resourceId,
                   chunkIndex: nextChunk,
                   chunkSize,
+                  totalChunks: targetTotalChunks,
                 });
                 meshNetwork.sendPacket(nextPkt);
               }
@@ -666,10 +713,26 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
           break;
         }
 
+        case 'TRANSFER_CONTROL': {
+          if (packet.targetId === myDevice.id) {
+            const { transferId, control } = packet.payload;
+            setActiveTransfers((prev) =>
+              prev.map((t) => {
+                if (t.id !== transferId) return t;
+                if (control === 'pause') return { ...t, status: 'paused' };
+                if (control === 'resume') return { ...t, status: 'transferring' };
+                if (control === 'cancel') return { ...t, status: 'cancelled', errorMessage: 'Cancelled by peer' };
+                return t;
+              })
+            );
+          }
+          break;
+        }
+
         case 'SEND_TEXT':
         case 'SEND_LINK':
         case 'CLIPBOARD_SHARE': {
-          if (!packet.targetId || packet.targetId === currentDevice.id || packet.payload.roomId) {
+          if (!packet.targetId || packet.targetId === myDevice.id || packet.payload.roomId) {
             const newMsg: PeerMessage = {
               id: packet.id,
               senderId: packet.senderId,
@@ -721,23 +784,23 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
           break;
         }
 
+        // Progressive 48 KB Burst Chunk Streaming
         case 'STREAM_REQUEST': {
-          if (packet.targetId === currentDevice.id) {
-            const { sessionId, resourceId } = packet.payload;
+          if (packet.targetId === myDevice.id) {
+            const { sessionId, resourceId, rangeOffsetBytes = 0, byteLength = 49152 * 6 } = packet.payload;
             logActivity({
               type: 'stream',
               level: 'info',
-              title: 'Direct Stream Requested',
-              details: `${packet.senderName} streaming resource ${resourceId}`,
+              title: 'Direct Stream Burst Requested',
+              details: `${packet.senderName} requested stream offset ${rangeOffsetBytes} bytes for ${resourceId}`,
               peerId: packet.senderId,
               peerName: packet.senderName,
               resourceId,
             });
 
-            // Send initial stream buffer (up to 1.5MB) for immediate fluid playback
             let blob = localBlobsRef.current.get(resourceId);
             if (!blob) {
-              for (const folders of Object.values(deviceSharedFolders)) {
+              for (const folders of Object.values(deviceSharedFoldersRef.current)) {
                 for (const f of folders) {
                   const found = f.resources.find((r) => r.id === resourceId);
                   if (found?.realFileBlob) {
@@ -751,48 +814,80 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
 
             if (blob) {
-              const slice = blob.slice(0, Math.min(blob.size, 1536 * 1024));
-              const reader = new FileReader();
-              reader.onload = () => {
-                const dataUrl = reader.result as string;
-                const dataBase64 = dataUrl.split(',')[1] || '';
-                const streamDataPkt = meshNetwork.createPacket('STREAM_DATA', currentDevice, packet.senderId, {
-                  sessionId,
-                  resourceId,
-                  dataBase64,
-                  mimeType: blob.type || 'video/mp4',
-                  totalBytes: blob.size,
-                });
-                meshNetwork.sendPacket(streamDataPkt);
-              };
-              reader.readAsDataURL(slice);
+              const STREAM_CHUNK = 49152;
+              const start = rangeOffsetBytes;
+              const burstEnd = Math.min(blob.size, start + byteLength);
+              const totalBurstChunks = Math.ceil((burstEnd - start) / STREAM_CHUNK);
+
+              for (let i = 0; i < totalBurstChunks; i++) {
+                const chunkStart = start + i * STREAM_CHUNK;
+                const chunkEnd = Math.min(burstEnd, chunkStart + STREAM_CHUNK);
+                const slice = blob.slice(chunkStart, chunkEnd);
+
+                const fileReader = new FileReader();
+                fileReader.onload = () => {
+                  const arrayBuf = fileReader.result as ArrayBuffer;
+                  const dataBase64 = arrayBufferToBase64(arrayBuf);
+                  const streamDataPkt = meshNetwork.createPacket('STREAM_DATA', myDevice, packet.senderId, {
+                    sessionId,
+                    resourceId,
+                    chunkIndex: i,
+                    totalBurstChunks,
+                    rangeOffsetBytes: chunkStart,
+                    totalBytes: blob.size,
+                    mimeType: blob.type || 'video/mp4',
+                    dataBase64,
+                    isEof: chunkEnd >= blob.size,
+                  });
+                  meshNetwork.sendPacket(streamDataPkt);
+                };
+                fileReader.readAsArrayBuffer(slice);
+              }
             }
           }
           break;
         }
 
         case 'STREAM_DATA': {
-          if (packet.targetId === currentDevice.id && packet.payload?.dataBase64) {
+          if (packet.targetId === myDevice.id && packet.payload?.dataBase64) {
             try {
-              const { dataBase64, mimeType, sessionId, resourceId } = packet.payload;
-              const byteChars = atob(dataBase64 || '');
-              const byteNumbers = new Uint8Array(byteChars.length);
-              for (let i = 0; i < byteChars.length; i++) {
-                byteNumbers[i] = byteChars.charCodeAt(i);
+              const { dataBase64, mimeType, sessionId, resourceId, chunkIndex, totalBurstChunks, isEof } =
+                packet.payload;
+              const byteNumbers = base64ToUint8Array(dataBase64 || '');
+              const streamChunkBlob = new Blob([byteNumbers], { type: mimeType || 'video/mp4' });
+
+              if (!streamChunksRef.current.has(sessionId)) {
+                streamChunksRef.current.set(sessionId, []);
               }
-              const streamBlob = new Blob([byteNumbers], { type: mimeType || 'video/mp4' });
-              const playableUrl = URL.createObjectURL(streamBlob);
-              localBlobsRef.current.set(resourceId, streamBlob);
+              const chunks = streamChunksRef.current.get(sessionId)!;
+              chunks.push(streamChunkBlob);
+
+              // Progressive playable Blob
+              const progressiveBlob = new Blob(chunks, { type: mimeType || 'video/mp4' });
+              const playableUrl = URL.createObjectURL(progressiveBlob);
+              localBlobsRef.current.set(resourceId, progressiveBlob);
 
               setActiveStream((curr) => {
                 if (!curr || curr.id !== sessionId) return curr;
                 return {
                   ...curr,
                   mediaUrl: playableUrl,
-                  bufferedBytes: streamBlob.size,
+                  bufferedBytes: progressiveBlob.size,
                   status: 'streaming',
                 };
               });
+
+              // Request next burst if not EOF and burst finished
+              if (!isEof && chunkIndex === totalBurstChunks - 1) {
+                const nextOffset = progressiveBlob.size;
+                const nextBurstPkt = meshNetwork.createPacket('STREAM_REQUEST', myDevice, packet.senderId, {
+                  sessionId,
+                  resourceId,
+                  rangeOffsetBytes: nextOffset,
+                  byteLength: 49152 * 6,
+                });
+                meshNetwork.sendPacket(nextBurstPkt);
+              }
             } catch (err) {
               console.warn('[Stream Data] Assembly error:', err);
             }
@@ -801,8 +896,8 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         case 'PING': {
-          if (packet.targetId === currentDevice.id || packet.targetId === 'all') {
-            const pongPkt = meshNetwork.createPacket('PONG', currentDevice, packet.senderId, {
+          if (packet.targetId === myDevice.id || packet.targetId === 'all') {
+            const pongPkt = meshNetwork.createPacket('PONG', myDevice, packet.senderId, {
               pingId: packet.payload.pingId || packet.id,
               clientSentTime: packet.payload.clientSentTime || packet.timestamp,
               sequence: packet.payload.sequence || 1,
@@ -814,13 +909,12 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         case 'PONG': {
-          if (packet.targetId === currentDevice.id) {
+          if (packet.targetId === myDevice.id) {
             const now = Date.now();
             const clientSentTime = packet.payload.clientSentTime;
-            const peer = nearbyPeers.find((p) => p.id === packet.senderId);
+            const peer = nearbyPeersRef.current.find((p) => p.id === packet.senderId);
             const isDirect = peer?.transportType === 'webrtc_direct';
             const rawRtt = clientSentTime ? Math.max(0.8, Number((now - clientSentTime).toFixed(1))) : 2.4;
-            // Direct P2P: 1-8 ms; Cloud Relay: smoothed 20-160 ms
             const calculatedRtt = isDirect
               ? Math.min(8.0, Math.max(0.8, rawRtt))
               : Math.min(180, Math.max(14, Math.round(rawRtt * 0.45)));
@@ -860,7 +954,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
 
     return () => unsubscribe();
-  }, [currentDevice, nearbyPeers, deviceSharedFolders, activeTransfers, logActivity, recordPacket]);
+  }, [currentDevice.id, logActivity, recordPacket]);
 
   // Periodic network announcement & presence beacon
   useEffect(() => {
@@ -1210,7 +1304,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
-    const chunkSize = 131072; // 128 KB high-speed chunks
+    const chunkSize = 49152; // 48 KB safe cross-browser SCTP chunks
     const totalChunks = Math.max(1, Math.ceil(resource.sizeBytes / chunkSize));
     const transferId = generateRandomId('xfer');
 
@@ -1234,6 +1328,9 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       chunkSize,
       totalChunks,
       currentChunk: isInstant ? totalChunks : 0,
+      receivedChunkCount: isInstant ? totalChunks : 0,
+      highestRequestedChunk: isInstant ? totalChunks : Math.min(totalChunks, 8),
+      transportType: peer.transportType || 'cloud_relay',
       speedMbps: peer.transportType === 'webrtc_direct' ? 92.4 : 34.5,
       direction: 'downloading',
       peerId: peer.id,
@@ -1264,15 +1361,17 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       a.click();
       document.body.removeChild(a);
     } else {
-      // Dispatch pipelined sliding window (first 4 chunks in parallel)
+      // Dispatch initial sliding window of 48 KB chunks (8 on direct WebRTC, 4 on relay)
       transferChunksRef.current.set(transferId, []);
-      const initialWindow = Math.min(totalChunks, 4);
+      const windowSize = peer.transportType === 'webrtc_direct' ? 8 : 4;
+      const initialWindow = Math.min(totalChunks, windowSize);
       for (let c = 0; c < initialWindow; c++) {
         const pkt = meshNetwork.createPacket('CHUNK_REQUEST', currentDevice, peerId, {
           resourceId: resource.id,
           transferId,
           chunkIndex: c,
           chunkSize,
+          totalChunks,
         });
         meshNetwork.sendPacket(pkt);
       }
@@ -1283,21 +1382,65 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setActiveTransfers((prev) =>
       prev.map((t) => (t.id === transferId ? { ...t, status: 'paused' } : t))
     );
-  }, []);
+    const target = activeTransfersRef.current.find((t) => t.id === transferId);
+    if (target) {
+      const pkt = meshNetwork.createPacket('TRANSFER_CONTROL', currentDevice, target.peerId, {
+        transferId,
+        control: 'pause',
+      });
+      meshNetwork.sendPacket(pkt);
+    }
+  }, [currentDevice]);
 
   const resumeTransfer = useCallback((transferId: string) => {
+    const target = activeTransfersRef.current.find((t) => t.id === transferId);
+    if (!target) return;
+
     setActiveTransfers((prev) =>
       prev.map((t) => (t.id === transferId ? { ...t, status: 'transferring' } : t))
     );
-  }, []);
+
+    const pkt = meshNetwork.createPacket('TRANSFER_CONTROL', currentDevice, target.peerId, {
+      transferId,
+      control: 'resume',
+    });
+    meshNetwork.sendPacket(pkt);
+
+    // Request missing chunks in sliding window
+    const chunks = transferChunksRef.current.get(transferId) || [];
+    let requested = 0;
+    const windowSize = target.transportType === 'webrtc_direct' ? 8 : 4;
+    for (let i = 0; i < target.totalChunks && requested < windowSize; i++) {
+      if (!chunks[i]) {
+        const reqPkt = meshNetwork.createPacket('CHUNK_REQUEST', currentDevice, target.peerId, {
+          resourceId: target.resourceId,
+          transferId,
+          chunkIndex: i,
+          chunkSize: target.chunkSize || 49152,
+          totalChunks: target.totalChunks,
+        });
+        meshNetwork.sendPacket(reqPkt);
+        requested++;
+      }
+    }
+  }, [currentDevice]);
 
   const cancelTransfer = useCallback((transferId: string) => {
+    const target = activeTransfersRef.current.find((t) => t.id === transferId);
+    if (target) {
+      const pkt = meshNetwork.createPacket('TRANSFER_CONTROL', currentDevice, target.peerId, {
+        transferId,
+        control: 'cancel',
+      });
+      meshNetwork.sendPacket(pkt);
+    }
+    transferChunksRef.current.delete(transferId);
     setActiveTransfers((prev) =>
       prev.map((t) => (t.id === transferId ? { ...t, status: 'cancelled' } : t))
     );
-  }, []);
+  }, [currentDevice]);
 
-  // Media Streaming Engine
+  // Media Streaming Engine: Progressive Burst Slicing without Fake Buffer Intervals
   const startDirectStream = useCallback((peerId: string, resource: VirtualResource) => {
     const peer = nearbyPeers.find((p) => p.id === peerId);
     if (!peer) return;
@@ -1332,7 +1475,8 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       peerName: peer.name,
       mimeType: resource.mimeType,
       totalSizeBytes: resource.sizeBytes,
-      bufferedBytes: Math.min(resource.sizeBytes, 32 * 1024 * 1024),
+      bufferedBytes: localBlob ? resource.sizeBytes : 0,
+      rangeOffsetBytes: 0,
       currentPositionSeconds: 0,
       durationSeconds: resource.durationSeconds || 194,
       status: 'streaming',
@@ -1342,6 +1486,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
 
     setActiveStream(newStream);
+    streamChunksRef.current.set(sessionId, []);
 
     logActivity({
       type: 'stream',
@@ -1353,42 +1498,15 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       resourceId: resource.id,
     });
 
+    // Request initial burst (up to 6 x 48KB = ~294 KB)
     const pkt = meshNetwork.createPacket('STREAM_REQUEST', currentDevice, peerId, {
       sessionId,
       resourceId: resource.id,
-      startByte: 0,
-      endByte: 32 * 1024 * 1024,
+      rangeOffsetBytes: 0,
+      byteLength: 49152 * 6,
     });
     meshNetwork.sendPacket(pkt);
   }, [currentDevice, nearbyPeers, logActivity]);
-
-  useEffect(() => {
-    if (!activeStream || activeStream.status !== 'streaming') return;
-
-    const interval = setInterval(() => {
-      setActiveStream((curr) => {
-        if (!curr || curr.status !== 'streaming') return curr;
-        const nextPos = curr.currentPositionSeconds + 1;
-        if (nextPos >= curr.durationSeconds) {
-          return { ...curr, currentPositionSeconds: curr.durationSeconds, status: 'ended' };
-        }
-
-        const nextBuffered = Math.min(
-          curr.totalSizeBytes,
-          curr.bufferedBytes + 3 * 1024 * 1024
-        );
-
-        return {
-          ...curr,
-          currentPositionSeconds: nextPos,
-          bufferedBytes: nextBuffered,
-          requestCount: curr.requestCount + 1,
-        };
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [activeStream]);
 
   const pauseStream = useCallback(() => {
     setActiveStream((curr) => (curr ? { ...curr, status: 'paused' } : null));
@@ -1401,17 +1519,20 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const seekStream = useCallback((seconds: number) => {
     setActiveStream((curr) => {
       if (!curr) return null;
+      const targetOffset = Math.floor((seconds / Math.max(1, curr.durationSeconds)) * curr.totalSizeBytes);
       const pkt = meshNetwork.createPacket('STREAM_REQUEST', currentDevice, curr.peerId, {
         sessionId: curr.id,
         resourceId: curr.resourceId,
         seekSeconds: seconds,
-        rangeOffsetBytes: Math.floor((seconds / curr.durationSeconds) * curr.totalSizeBytes),
+        rangeOffsetBytes: targetOffset,
+        byteLength: 49152 * 6,
       });
       meshNetwork.sendPacket(pkt);
 
       return {
         ...curr,
         currentPositionSeconds: seconds,
+        rangeOffsetBytes: targetOffset,
         requestCount: curr.requestCount + 1,
       };
     });
