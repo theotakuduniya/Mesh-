@@ -30,13 +30,39 @@ async function startServer() {
   const packetQueues = new Map<string, any[]>(); // targetPeerId -> packets[]
   const MAX_QUEUE_SIZE = 100;
 
-  // Real-time WebSocket signaling server
-  const wss = new WebSocketServer({ server, path: '/api/mesh/ws' });
+  // Real-time WebSocket signaling server with 100MB payload support & Render keepalive
+  const wss = new WebSocketServer({
+    server,
+    path: '/api/mesh/ws',
+    maxPayload: 100 * 1024 * 1024,
+  });
 
-  wss.on('connection', (ws) => {
+  // Render reverse proxy 25-second keepalive interval (prevents 55-sec proxy idle disconnects)
+  const heartbeatInterval = setInterval(() => {
+    wss.clients.forEach((wsClient: any) => {
+      if (wsClient.isAlive === false) {
+        return wsClient.terminate();
+      }
+      wsClient.isAlive = false;
+      try {
+        wsClient.ping();
+      } catch (e) {}
+    });
+  }, 25000);
+
+  wss.on('close', () => {
+    clearInterval(heartbeatInterval);
+  });
+
+  wss.on('connection', (ws: any) => {
+    ws.isAlive = true;
+    ws.on('pong', () => {
+      ws.isAlive = true;
+    });
+
     let peerId: string | null = null;
 
-    ws.on('message', (raw) => {
+    ws.on('message', (raw: any) => {
       try {
         const text = raw.toString();
         const packet = JSON.parse(text);
@@ -102,7 +128,7 @@ async function startServer() {
             id: `pkt_off_${Date.now()}`,
             action: 'DISCOVER',
             senderId: peerId,
-            senderName: peer.name,
+            senderName: peer?.name || 'Peer',
             targetId: 'all',
             timestamp: Date.now(),
             payload: { id: peerId, isOnline: false },
@@ -118,7 +144,7 @@ async function startServer() {
       }
     });
 
-    ws.on('error', (err) => {
+    ws.on('error', (err: any) => {
       console.warn('[Mesh WS] Client error:', err);
     });
   });

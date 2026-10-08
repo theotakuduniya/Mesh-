@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Activity,
   Wifi,
+  Zap,
 } from 'lucide-react';
 import { useMesh } from '../../context/MeshContext';
 import { VirtualResource } from '../../types/mesh';
@@ -38,13 +39,17 @@ interface HealthStats {
   scorePct: number;
 }
 
-const getSignalHealth = (latencyMs: number, isOnline: boolean): HealthStats => {
+const getSignalHealth = (
+  latencyMs: number,
+  isOnline: boolean,
+  transportType?: 'webrtc_direct' | 'cloud_relay'
+): HealthStats => {
   if (!isOnline) {
     return {
       level: 'red',
       barsCount: 0,
       qualityLabel: 'Offline',
-      qualityDescription: 'Peer unreachable on subnet',
+      qualityDescription: 'Peer disconnected from mesh network',
       colorClass: 'text-rose-400',
       badgeBg: 'bg-rose-500/10',
       badgeBorder: 'border-rose-500/20',
@@ -54,50 +59,121 @@ const getSignalHealth = (latencyMs: number, isOnline: boolean): HealthStats => {
     };
   }
 
-  // Green: Ultra-low latency LAN connection (< 15 ms)
-  if (latencyMs <= 15) {
+  const isDirect = transportType === 'webrtc_direct';
+
+  if (isDirect) {
+    // Direct P2P via WebRTC DataChannel (Ultra-low latency LAN or direct internet WAN)
+    if (latencyMs <= 30) {
+      return {
+        level: 'green',
+        barsCount: 4,
+        qualityLabel: 'Optimal',
+        qualityDescription: 'Direct P2P Link (Ultra-Low Latency Wi-Fi / LAN)',
+        colorClass: 'text-emerald-400',
+        badgeBg: 'bg-emerald-500/10',
+        badgeBorder: 'border-emerald-500/25',
+        badgeText: 'text-emerald-400',
+        dotColor: 'bg-emerald-400',
+        scorePct: Math.max(95, Math.round(100 - latencyMs * 0.3)),
+      };
+    }
+    if (latencyMs <= 90) {
+      return {
+        level: 'green',
+        barsCount: 3,
+        qualityLabel: 'Good',
+        qualityDescription: 'Direct P2P Link (Direct Internet WAN)',
+        colorClass: 'text-emerald-400',
+        badgeBg: 'bg-emerald-500/10',
+        badgeBorder: 'border-emerald-500/25',
+        badgeText: 'text-emerald-400',
+        dotColor: 'bg-emerald-400',
+        scorePct: Math.max(80, Math.round(95 - (latencyMs - 30) * 0.25)),
+      };
+    }
+    if (latencyMs <= 180) {
+      return {
+        level: 'yellow',
+        barsCount: 2,
+        qualityLabel: 'Fair',
+        qualityDescription: 'Direct P2P Link (Cross-Region Routing)',
+        colorClass: 'text-amber-400',
+        badgeBg: 'bg-amber-500/10',
+        badgeBorder: 'border-amber-500/25',
+        badgeText: 'text-amber-400',
+        dotColor: 'bg-amber-400',
+        scorePct: Math.max(60, Math.round(80 - (latencyMs - 90) * 0.2)),
+      };
+    }
+    return {
+      level: 'red',
+      barsCount: 1,
+      qualityLabel: 'Degraded',
+      qualityDescription: 'Direct link experiencing packet delay / congestion',
+      colorClass: 'text-rose-400',
+      badgeBg: 'bg-rose-500/10',
+      badgeBorder: 'border-rose-500/25',
+      badgeText: 'text-rose-400',
+      dotColor: 'bg-rose-400',
+      scorePct: Math.max(25, Math.round(50 - (latencyMs - 180) * 0.1)),
+    };
+  }
+
+  // Cloud Relay (Render WebSocket relay server):
+  // 30ms - 130ms is optimal cloud broadband
+  if (latencyMs <= 120) {
     return {
       level: 'green',
       barsCount: 4,
-      qualityLabel: 'Excellent',
-      qualityDescription: 'Optimal Gigabit LAN / Wi-Fi 6',
+      qualityLabel: 'Optimal',
+      qualityDescription: 'Stable Cloud Relay (Fast Regional Server)',
       colorClass: 'text-emerald-400',
       badgeBg: 'bg-emerald-500/10',
       badgeBorder: 'border-emerald-500/25',
       badgeText: 'text-emerald-400',
       dotColor: 'bg-emerald-400',
-      scorePct: Math.max(92, Math.round(100 - latencyMs * 0.5)),
+      scorePct: Math.max(90, Math.round(98 - latencyMs * 0.15)),
     };
   }
-
-  // Yellow: Moderate / fair latency (16 ms - 50 ms)
-  if (latencyMs <= 50) {
+  if (latencyMs <= 220) {
     return {
       level: 'yellow',
       barsCount: 3,
-      qualityLabel: 'Fair',
-      qualityDescription: 'Stable local wireless hop',
+      qualityLabel: 'Good',
+      qualityDescription: 'Standard Cloud Relay (Broadband Internet)',
       colorClass: 'text-amber-400',
       badgeBg: 'bg-amber-500/10',
       badgeBorder: 'border-amber-500/25',
       badgeText: 'text-amber-400',
       dotColor: 'bg-amber-400',
-      scorePct: Math.max(65, Math.round(90 - (latencyMs - 15) * 0.7)),
+      scorePct: Math.max(70, Math.round(88 - (latencyMs - 120) * 0.15)),
     };
   }
-
-  // Red: High latency / degraded link (> 50 ms)
+  if (latencyMs <= 380) {
+    return {
+      level: 'yellow',
+      barsCount: 2,
+      qualityLabel: 'Fair',
+      qualityDescription: 'Moderate Latency (Intercontinental Relay)',
+      colorClass: 'text-amber-400',
+      badgeBg: 'bg-amber-500/10',
+      badgeBorder: 'border-amber-500/25',
+      badgeText: 'text-amber-400',
+      dotColor: 'bg-amber-400',
+      scorePct: Math.max(50, Math.round(70 - (latencyMs - 220) * 0.12)),
+    };
+  }
   return {
     level: 'red',
     barsCount: 1,
     qualityLabel: 'Degraded',
-    qualityDescription: 'High latency / congestion detected',
+    qualityDescription: 'High latency / congestion detected (>380ms)',
     colorClass: 'text-rose-400',
     badgeBg: 'bg-rose-500/10',
     badgeBorder: 'border-rose-500/25',
     badgeText: 'text-rose-400',
     dotColor: 'bg-rose-400',
-    scorePct: Math.max(20, Math.round(50 - (latencyMs - 50) * 0.5)),
+    scorePct: Math.max(20, Math.round(45 - (latencyMs - 380) * 0.08)),
   };
 };
 
@@ -165,12 +241,14 @@ export const PeerDetailView: React.FC = () => {
     toggleSidebar,
     isSidebarCollapsed,
     pingPeer,
+    connectDirectWebRTC,
   } = useMesh();
 
   const [activeTab, setActivePeerTab] = useState<'resources' | 'messages' | 'permissions'>('resources');
   const [chatInput, setChatInput] = useState('');
   const [clipboardSnippet, setClipboardSnippet] = useState('');
   const [previewResource, setPreviewResource] = useState<VirtualResource | null>(null);
+  const [isBoosting, setIsBoosting] = useState(false);
 
   const peer = nearbyPeers.find((p) => p.id === selectedPeerId);
 
@@ -184,6 +262,18 @@ export const PeerDetailView: React.FC = () => {
     peer?.latencyMs || 1.2,
   ]);
   const [jitterMs, setJitterMs] = useState<number>(0.2);
+
+  const handleBoostP2P = async () => {
+    if (!peer || isBoosting) return;
+    setIsBoosting(true);
+    await connectDirectWebRTC(peer.id);
+    const rtt = await pingPeer(peer.id);
+    if (rtt) {
+      setLiveLatency(rtt);
+      setLatencyHistory((prev) => [...prev.slice(-9), rtt]);
+    }
+    setIsBoosting(false);
+  };
 
   // Sync if context latency changes
   useEffect(() => {
@@ -234,7 +324,7 @@ export const PeerDetailView: React.FC = () => {
     );
   }
 
-  const health = getSignalHealth(liveLatency, peer.isOnline && peer.status !== 'revoked');
+  const health = getSignalHealth(liveLatency, peer.isOnline && peer.status !== 'revoked', peer.transportType);
   const resources = getPeerResources(peer.id);
   const peerMessages = messages.filter(
     (m) =>
@@ -315,6 +405,18 @@ export const PeerDetailView: React.FC = () => {
                     <span className="opacity-40">·</span>
                     <span className="font-mono">{liveLatency} ms</span>
                   </div>
+
+                  {/* Transport Type Indicator Badge */}
+                  {peer.transportType === 'webrtc_direct' ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 font-mono">
+                      <Zap className="w-2.5 h-2.5 text-emerald-400" />
+                      Direct P2P
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-sky-500/10 text-sky-400 border border-sky-500/25 font-mono">
+                      Mesh Relay (Cloud)
+                    </span>
+                  )}
                 </div>
                 <div className="text-xs text-zinc-400 mt-0.5">
                   {peer.ownerName} · {peer.os} · <span className="font-mono text-zinc-300">{peer.ip}</span>
@@ -367,7 +469,7 @@ export const PeerDetailView: React.FC = () => {
                   <SignalIcon level={health.level} barsCount={health.barsCount} size="md" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
                       Connection Health
                     </span>
@@ -377,11 +479,38 @@ export const PeerDetailView: React.FC = () => {
                       <span className={`w-1.5 h-1.5 rounded-full ${health.dotColor} animate-pulse`} />
                       {health.qualityLabel} Quality
                     </span>
+
+                    {/* Transport Badge */}
+                    {peer.transportType === 'webrtc_direct' ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 font-mono">
+                        <Zap className="w-2.5 h-2.5" />
+                        WebRTC DataChannel
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/25 font-mono">
+                        Cloud Relay (Render)
+                      </span>
+                    )}
+
+                    {/* Boost button if currently on cloud relay */}
+                    {peer.transportType !== 'webrtc_direct' && peer.isOnline && (
+                      <button
+                        onClick={handleBoostP2P}
+                        disabled={isBoosting}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[10px] font-medium transition-all shadow-xs cursor-pointer disabled:opacity-50"
+                        title="Establish direct browser-to-browser WebRTC connection to bypass relay and achieve sub-15ms line speed"
+                      >
+                        <Zap className={`w-3 h-3 text-emerald-400 ${isBoosting ? 'animate-bounce' : ''}`} />
+                        <span>{isBoosting ? 'Connecting...' : 'Boost to Direct P2P'}</span>
+                      </button>
+                    )}
                   </div>
                   <div className="text-xs text-zinc-400 mt-0.5 flex items-center gap-2">
                     <span>{health.qualityDescription}</span>
                     <span>·</span>
-                    <span className="font-mono text-zinc-500">Direct LAN Peer</span>
+                    <span className="font-mono text-zinc-400">
+                      {peer.transportType === 'webrtc_direct' ? 'Sub-15ms Direct Peer Hop' : 'Render Managed WebSocket Relay'}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -418,7 +547,7 @@ export const PeerDetailView: React.FC = () => {
                   onClick={handleManualPing}
                   disabled={isPinging || !peer.isOnline}
                   className="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-white/5 transition-colors flex items-center gap-1.5 text-xs font-medium disabled:opacity-50 cursor-pointer shadow-xs"
-                  title="Send immediate P2P ping packet to measure current latency"
+                  title="Send immediate P2P ping packet to measure current wire latency"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 text-blue-400 ${isPinging ? 'animate-spin' : ''}`} />
                   <span>{isPinging ? 'Pinging...' : 'Ping'}</span>
@@ -433,13 +562,22 @@ export const PeerDetailView: React.FC = () => {
                 <span>Real-time round trip history:</span>
                 <div className="flex items-end gap-1.5 h-5 ml-1">
                   {latencyHistory.map((val, idx) => {
-                    const heightPct = Math.min(100, Math.max(25, Math.round((val / 12) * 100)));
-                    const barColor =
-                      val <= 15
+                    const isDirect = peer.transportType === 'webrtc_direct';
+                    const maxScale = isDirect ? 40 : 250;
+                    const heightPct = Math.min(100, Math.max(20, Math.round((val / maxScale) * 100)));
+                    const barColor = isDirect
+                      ? val <= 30
                         ? 'bg-emerald-500/80 hover:bg-emerald-400'
-                        : val <= 50
+                        : val <= 90
+                        ? 'bg-emerald-400/80 hover:bg-emerald-300'
+                        : val <= 180
                         ? 'bg-amber-500/80 hover:bg-amber-400'
-                        : 'bg-rose-500/80 hover:bg-rose-400';
+                        : 'bg-rose-500/80 hover:bg-rose-400'
+                      : val <= 120
+                      ? 'bg-emerald-500/80 hover:bg-emerald-400'
+                      : val <= 220
+                      ? 'bg-amber-500/80 hover:bg-amber-400'
+                      : 'bg-rose-500/80 hover:bg-rose-400';
                     return (
                       <div
                         key={idx}

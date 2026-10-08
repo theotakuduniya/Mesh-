@@ -307,15 +307,17 @@ export const NearbyView: React.FC = () => {
                               ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
                               : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 border border-white/5'
                           }`}
-                          title="Click to send small P2P ping packet and measure network latency"
+                          title="Click to send small wire ping packet and measure network round-trip time"
                         >
                           <span
                             className={`w-1.5 h-1.5 rounded-full ${
                               wasPinged
                                 ? 'bg-emerald-400 animate-ping'
-                                : peer.latencyMs < 5
+                                : (peer.transportType === 'webrtc_direct' ? peer.latencyMs <= 60 : peer.latencyMs <= 180)
                                 ? 'bg-emerald-400'
-                                : 'bg-amber-400'
+                                : peer.latencyMs <= 380
+                                ? 'bg-amber-400'
+                                : 'bg-rose-400'
                             }`}
                           />
                           <span>{isPinging ? '...' : `${peer.latencyMs} ms`}</span>

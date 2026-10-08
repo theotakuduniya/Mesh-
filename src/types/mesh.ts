@@ -39,6 +39,7 @@ export interface PeerDevice {
   trustedSince?: number;
   permissions: PeerPermissions;
   activeStreamCount: number;
+  transportType?: 'webrtc_direct' | 'cloud_relay';
 }
 
 export interface PeerPermissions {
@@ -97,6 +98,10 @@ export type ProtocolAction =
   | 'CHUNK_REQUEST'
   | 'DOWNLOAD_REQUEST'
   | 'STREAM_REQUEST'
+  | 'STREAM_DATA'
+  | 'SIGNAL_OFFER'
+  | 'SIGNAL_ANSWER'
+  | 'SIGNAL_ICE'
   | 'SEND_TEXT'
   | 'SEND_LINK'
   | 'SEND_FILE'

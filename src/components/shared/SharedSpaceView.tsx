@@ -93,14 +93,16 @@ export const SharedSpaceView: React.FC = () => {
 
   const readFileAsDataUrl = (file: File): Promise<string> => {
     return new Promise((resolve) => {
-      if (file.size > 20 * 1024 * 1024) {
+      // Only generate inline data URL for small images under 200KB
+      if (file.type.startsWith('image/') && file.size <= 200 * 1024) {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => resolve(URL.createObjectURL(file));
+        reader.readAsDataURL(file);
+      } else {
+        // High-performance zero-bloat local blob URL
         resolve(URL.createObjectURL(file));
-        return;
       }
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = () => resolve(URL.createObjectURL(file));
-      reader.readAsDataURL(file);
     });
   };
 
