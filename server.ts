@@ -222,11 +222,17 @@ async function startServer() {
   });
 
   // Static files & SPA mounting
-  if (isProd && fs.existsSync(path.resolve(__dirname, 'dist'))) {
-    console.log('[Server] Running in Production mode: serving ./dist');
-    app.use(express.static(path.resolve(__dirname, 'dist')));
+  const distDir = fs.existsSync(path.resolve(__dirname, 'dist'))
+    ? path.resolve(__dirname, 'dist')
+    : fs.existsSync(path.resolve(__dirname, 'index.html'))
+    ? __dirname
+    : null;
+
+  if (distDir && (isProd || process.env.NODE_ENV === 'production')) {
+    console.log(`[Server] Running in Production mode: serving ${distDir}`);
+    app.use(express.static(distDir));
     app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+      res.sendFile(path.resolve(distDir, 'index.html'));
     });
   } else {
     console.log('[Server] Running in Development mode: mounting Vite middleware');
