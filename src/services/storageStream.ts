@@ -5,6 +5,8 @@
  * 3. Save Points: persists received chunks in OPFS so page refresh does not lose downloaded progress.
  */
 
+import { wakeLock } from './wakeLock';
+
 export interface DiskStreamSession {
   transferId: string;
   resourceId: string;
@@ -76,6 +78,7 @@ class StorageStreamEngine {
       };
 
       this.activeStreams.set(transferId, session);
+      wakeLock.acquire('storage_disk_stream');
       return session;
     } catch (err: any) {
       // User cancelled picker or permission error: fall back to OPFS
@@ -133,6 +136,7 @@ class StorageStreamEngine {
 
       this.activeStreams.set(transferId, session);
       this.persistDraftMetadata(session);
+      wakeLock.acquire('storage_disk_stream');
       return session;
     } catch (err) {
       console.warn('[StorageStream] OPFS initialization failed:', err);
@@ -200,6 +204,9 @@ class StorageStreamEngine {
 
       this.activeStreams.delete(transferId);
       this.clearDraftMetadata(session.resourceId);
+      if (this.activeStreams.size === 0) {
+        wakeLock.release('storage_disk_stream');
+      }
 
       // If native file picker, file is already directly on user hard drive!
       if (session.type === 'native_file_picker') {
@@ -238,6 +245,9 @@ class StorageStreamEngine {
         try { session.writable.abort(); } catch {}
       }
       this.activeStreams.delete(transferId);
+      if (this.activeStreams.size === 0) {
+        wakeLock.release('storage_disk_stream');
+      }
     }
   }
 

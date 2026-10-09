@@ -7,6 +7,7 @@ import {
   ShieldCheck,
   ChevronUp,
   ChevronDown,
+  Sun,
 } from 'lucide-react';
 import { useMesh } from '../../context/MeshContext';
 import { formatBytes } from '../../services/crypto';
@@ -45,10 +46,19 @@ export const TransferManager: React.FC = () => {
 
         <div className="flex items-center gap-2">
           {activeCount > 0 && (
-            <span className="text-[11px] font-mono text-emerald-400 tabular-nums flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              {activeCount} active
-            </span>
+            <>
+              <span className="text-[11px] font-mono text-emerald-400 tabular-nums flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                {activeCount} active
+              </span>
+              <span
+                className="text-[10px] font-mono text-amber-300 bg-amber-950/60 border border-amber-500/30 px-1.5 py-0.5 rounded hidden sm:flex items-center gap-1"
+                title="Screen Wake Lock is active to prevent mobile OS sleep and throttling"
+              >
+                <Sun className="w-2.5 h-2.5 text-amber-400 animate-pulse" />
+                Screen Awake
+              </span>
+            </>
           )}
           <button
             type="button"

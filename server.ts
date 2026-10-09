@@ -509,7 +509,8 @@ async function startServer() {
   // Explicit service worker endpoint with Service-Worker-Allowed header & multi-location fallback
   app.get('/sw.js', (_req, res) => {
     const candidatePaths = [
-      path.resolve(__dirname, 'sw.js'), // When executing dist/server.js in production
+      path.resolve(process.cwd(), 'sw.js'), // Project root sw.js
+      path.resolve(__dirname, 'sw.js'), // Root or dist/sw.js
       path.resolve(__dirname, 'public/sw.js'), // When executing server.ts in local dev
       path.resolve(process.cwd(), 'dist/sw.js'), // Project root dist
       path.resolve(process.cwd(), 'public/sw.js'), // Project root public

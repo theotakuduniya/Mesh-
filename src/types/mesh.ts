@@ -95,6 +95,8 @@ export type ProtocolAction =
   | 'LIST_RESOURCES'
   | 'GET_METADATA'
   | 'READ_CHUNK'
+  | 'READ_CHUNK_DATA'
+  | 'READ_CHUNK_RESPONSE'
   | 'CHUNK_DATA'
   | 'CHUNK_REQUEST'
   | 'DOWNLOAD_REQUEST'

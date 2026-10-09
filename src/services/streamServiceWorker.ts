@@ -4,6 +4,8 @@
  * directly to the peer WebRTC data channels or local blobs.
  */
 
+import { wakeLock } from './wakeLock';
+
 export interface SwRangeRequestPayload {
   requestId: string;
   peerId: string;
@@ -29,6 +31,7 @@ class StreamServiceWorkerManager {
   private channel: BroadcastChannel | null = null;
   private handler: RangeRequestHandler | null = null;
   private isReady = false;
+  private wakeLockIdleTimer: any = null;
 
   constructor() {
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -84,12 +87,23 @@ class StreamServiceWorkerManager {
 
   private async handleIncomingMessage(event: MessageEvent): Promise<void> {
     const data = event.data;
-    if (!data || data.type !== 'RANGE_REQUEST' || !data.requestId) return;
+    if (!data || !data.requestId) return;
+    const isRequest = data.type === 'RANGE_REQUEST' || data.type === 'READ_CHUNK' || data.action === 'READ_CHUNK';
+    if (!isRequest) return;
 
     if (!this.handler) {
       this.sendError(data.requestId, 'No client range handler registered');
       return;
     }
+
+    // Keep screen awake while chunks are actively being streamed
+    wakeLock.acquire('stream_service');
+    if (this.wakeLockIdleTimer) {
+      clearTimeout(this.wakeLockIdleTimer);
+    }
+    this.wakeLockIdleTimer = setTimeout(() => {
+      wakeLock.release('stream_service');
+    }, 15000);
 
     try {
       const response = await this.handler(data);
@@ -99,7 +113,8 @@ class StreamServiceWorkerManager {
       }
 
       const msg = {
-        type: 'RANGE_RESPONSE',
+        type: 'READ_CHUNK_RESPONSE',
+        rangeType: 'RANGE_RESPONSE',
         requestId: data.requestId,
         buffer: response.buffer,
         totalSize: response.totalSize,
@@ -110,8 +125,11 @@ class StreamServiceWorkerManager {
 
       if (this.channel) {
         this.channel.postMessage(msg);
-      } else if (navigator.serviceWorker?.controller) {
+        this.channel.postMessage({ ...msg, type: 'RANGE_RESPONSE' });
+      }
+      if (navigator.serviceWorker?.controller) {
         navigator.serviceWorker.controller.postMessage(msg);
+        navigator.serviceWorker.controller.postMessage({ ...msg, type: 'RANGE_RESPONSE' });
       }
     } catch (err: any) {
       this.sendError(data.requestId, err?.message || 'Range handler failed');
@@ -120,15 +138,31 @@ class StreamServiceWorkerManager {
 
   private sendError(requestId: string, error: string): void {
     const msg = {
-      type: 'RANGE_ERROR',
+      type: 'READ_CHUNK_ERROR',
+      rangeType: 'RANGE_ERROR',
       requestId,
       error,
     };
     if (this.channel) {
       this.channel.postMessage(msg);
-    } else if (navigator.serviceWorker?.controller) {
-      navigator.serviceWorker.controller.postMessage(msg);
+      this.channel.postMessage({ ...msg, type: 'RANGE_ERROR' });
     }
+    if (navigator.serviceWorker?.controller) {
+      navigator.serviceWorker.controller.postMessage(msg);
+      navigator.serviceWorker.controller.postMessage({ ...msg, type: 'RANGE_ERROR' });
+    }
+  }
+
+  public async acquireWakeLock(reason = 'streaming'): Promise<boolean> {
+    return wakeLock.acquire(reason);
+  }
+
+  public releaseWakeLock(reason = 'streaming'): void {
+    wakeLock.release(reason);
+  }
+
+  public isWakeLockActive(): boolean {
+    return wakeLock.isLocked();
   }
 }
 

@@ -227,6 +227,8 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const streamChunksRef = useRef<Map<string, Blob[]>>(new Map());
   const streamRequestedChunksRef = useRef<Map<string, Map<number, number>>>(new Map());
   const pendingRangeResolversRef = useRef<Map<string, { resolve: (res: any) => void; reject: (err: any) => void }>>(new Map());
+  const hostUploadWakeLockTimerRef = useRef<any>(null);
+  const hostStreamWakeLockTimerRef = useRef<any>(null);
 
   // Stable state mirrors for high-frequency packet listeners to prevent listener thrashing
   const currentDeviceRef = useRef<DeviceIdentity>(currentDevice);
@@ -344,7 +346,10 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       // 2. Fetch byte range from remote peer over WebRTC
-      if (!req.peerId) return null;
+      const targetPeerId = req.peerId || activeStreamRef.current?.peerId;
+      const targetResourceId = req.resourceId || activeStreamRef.current?.resourceId;
+      if (!targetPeerId || !targetResourceId) return null;
+
       wakeLock.acquire('stream');
 
       return new Promise((resolve) => {
@@ -364,9 +369,9 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
           },
         });
 
-        const rangePkt = meshNetwork.createPacket('STREAM_RANGE_REQUEST', currentDeviceRef.current, req.peerId, {
+        const rangePkt = meshNetwork.createPacket('STREAM_RANGE_REQUEST', currentDeviceRef.current, targetPeerId, {
           requestId: req.requestId,
-          resourceId: req.resourceId,
+          resourceId: targetResourceId,
           start: req.start,
           end: req.end,
         });
@@ -677,6 +682,15 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
         case 'CHUNK_REQUEST':
         case 'READ_CHUNK': {
           if (packet.targetId === myDevice.id) {
+            // Screen Wake Lock API: Prevent mobile screen sleep while serving chunks to peers
+            wakeLock.acquire('transfer_upload');
+            if (hostUploadWakeLockTimerRef.current) {
+              clearTimeout(hostUploadWakeLockTimerRef.current);
+            }
+            hostUploadWakeLockTimerRef.current = setTimeout(() => {
+              wakeLock.release('transfer_upload');
+            }, 15000);
+
             const { resourceId, chunkIndex = 0, chunkSize = 49152, transferId } = packet.payload;
             let blob = localBlobsRef.current.get(resourceId);
             if (!blob) {
@@ -1061,8 +1075,18 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         // Service Worker HTTP 206 Range Proxy Interception (Instant seeking, 0 RAM overhead)
-        case 'STREAM_RANGE_REQUEST': {
+        case 'STREAM_RANGE_REQUEST':
+        case 'READ_CHUNK': {
           if (packet.targetId === myDevice.id) {
+            // Screen Wake Lock API: Prevent mobile screen sleep while streaming media to remote peers
+            wakeLock.acquire('stream_host');
+            if (hostStreamWakeLockTimerRef.current) {
+              clearTimeout(hostStreamWakeLockTimerRef.current);
+            }
+            hostStreamWakeLockTimerRef.current = setTimeout(() => {
+              wakeLock.release('stream_host');
+            }, 15000);
+
             const { requestId, resourceId, start = 0, end } = packet.payload;
             let blob = localBlobsRef.current.get(resourceId);
             if (!blob) {
@@ -1119,7 +1143,9 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
           break;
         }
 
-        case 'STREAM_RANGE_DATA': {
+        case 'STREAM_RANGE_DATA':
+        case 'READ_CHUNK_DATA':
+        case 'READ_CHUNK_RESPONSE': {
           if (packet.targetId === myDevice.id) {
             const { requestId, dataBase64, totalSize, mimeType, start, end, error } = packet.payload;
             const resolver = pendingRangeResolversRef.current.get(requestId);

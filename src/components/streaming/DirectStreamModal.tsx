@@ -11,9 +11,11 @@ import {
   Maximize,
   Loader2,
   HardDrive,
+  Sun,
 } from 'lucide-react';
 import { useMesh } from '../../context/MeshContext';
 import { formatBytes } from '../../services/crypto';
+import { wakeLock } from '../../services/wakeLock';
 
 export const DirectStreamModal: React.FC = () => {
   const { activeStream, pauseStream, resumeStream, seekStream, closeStream } = useMesh();
@@ -44,6 +46,18 @@ export const DirectStreamModal: React.FC = () => {
     if (!el) return;
     el.volume = isMuted ? 0 : volume;
   }, [volume, isMuted, hasRealMediaUrl]);
+
+  // Screen Wake Lock API: Keep mobile/desktop display awake while streaming media
+  useEffect(() => {
+    if (activeStream && isPlaying) {
+      wakeLock.acquire('stream_modal');
+    } else {
+      wakeLock.release('stream_modal');
+    }
+    return () => {
+      wakeLock.release('stream_modal');
+    };
+  }, [activeStream, isPlaying]);
 
   if (!activeStream) return null;
 
@@ -107,6 +121,13 @@ export const DirectStreamModal: React.FC = () => {
             </span>
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-950/60 text-purple-300 border border-purple-500/20 font-mono shrink-0">
               {hasRealMediaUrl ? 'Direct P2P Stream' : 'Buffering P2P Stream'}
+            </span>
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded bg-amber-950/70 text-amber-300 border border-amber-500/30 font-mono shrink-0 hidden sm:flex items-center gap-1"
+              title="Screen Wake Lock is active: prevents your display from sleeping during playback"
+            >
+              <Sun className="w-2.5 h-2.5 text-amber-400 animate-pulse" />
+              Screen Awake
             </span>
           </div>
 
