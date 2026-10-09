@@ -367,6 +367,19 @@ async function startServer() {
     res.json({ peers: activeList });
   });
 
+  // Explicit service worker endpoint with Service-Worker-Allowed header
+  app.get('/sw.js', (_req, res) => {
+    const swPath = path.resolve(__dirname, 'public/sw.js');
+    if (fs.existsSync(swPath)) {
+      res.setHeader('Content-Type', 'application/javascript');
+      res.setHeader('Service-Worker-Allowed', '/');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.sendFile(swPath);
+    } else {
+      res.status(404).send('Not found');
+    }
+  });
+
   // Static files & SPA mounting
   const distDir = fs.existsSync(path.resolve(__dirname, 'dist'))
     ? path.resolve(__dirname, 'dist')

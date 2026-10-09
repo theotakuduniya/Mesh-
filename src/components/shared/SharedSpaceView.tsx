@@ -27,7 +27,7 @@ import {
 import { useMesh } from '../../context/MeshContext';
 import { SharedFolder, VirtualResource } from '../../types/mesh';
 import { formatBytes, generateRandomId, computeSha256 } from '../../services/crypto';
-import { generateImageThumbnail, createSampleTestVideo } from '../../services/virtualFs';
+import { generateImageThumbnail } from '../../services/virtualFs';
 
 export const SharedSpaceView: React.FC = () => {
   const {
@@ -247,22 +247,6 @@ export const SharedSpaceView: React.FC = () => {
     setIsMountModalOpen(false);
     setUploadFeedback(`Mounted local PC folder "${rootName}" with ${resources.length} files (${formatBytes(totalBytes)})`);
     setTimeout(() => setUploadFeedback(null), 4000);
-  };
-
-  const [isGeneratingSample, setIsGeneratingSample] = useState(false);
-
-  const handleCreateSampleVideo = async () => {
-    setIsGeneratingSample(true);
-    try {
-      const sampleFile = await createSampleTestVideo();
-      const dt = new DataTransfer();
-      dt.items.add(sampleFile);
-      await handleRealFilesUpload(dt.files);
-    } catch (err) {
-      console.warn('Error generating sample video:', err);
-    } finally {
-      setIsGeneratingSample(false);
-    }
   };
 
   // Drag & drop handlers
@@ -721,21 +705,6 @@ export const SharedSpaceView: React.FC = () => {
                                 <div className="text-[10px] text-zinc-400">Mount an entire folder from PC</div>
                               </div>
                             </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setIsUploadDropdownOpen(false);
-                                handleCreateSampleVideo();
-                              }}
-                              className="w-full px-3.5 py-2.5 text-left text-xs text-purple-300 hover:text-white hover:bg-purple-950/40 flex items-center gap-2.5 transition-colors"
-                            >
-                              <Video className="w-4 h-4 text-purple-400 shrink-0" />
-                              <div>
-                                <div className="font-medium text-purple-200">Create Test Video</div>
-                                <div className="text-[10px] text-purple-400/80">Generate 2s HD P2P video stream</div>
-                              </div>
-                            </button>
                           </div>
                         )}
                       </div>
@@ -767,15 +736,6 @@ export const SharedSpaceView: React.FC = () => {
                     >
                       <FolderPlus className="w-4 h-4 text-blue-400" />
                       <span>Mount Folder</span>
-                    </button>
-                    <button
-                      onClick={handleCreateSampleVideo}
-                      disabled={isGeneratingSample}
-                      className="px-3 py-2 rounded-lg bg-purple-950/60 hover:bg-purple-900/80 text-purple-300 border border-purple-500/30 text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                      title="Quickly generate a real 2-second video blob to test P2P video streaming"
-                    >
-                      <Video className="w-3.5 h-3.5 text-purple-400" />
-                      <span>{isGeneratingSample ? 'Generating...' : 'Create Sample Video'}</span>
                     </button>
                   </div>
                 </div>

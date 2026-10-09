@@ -33,6 +33,9 @@ import {
   arrayBufferToBase64,
   base64ToUint8Array,
 } from '../services/crypto';
+import { wakeLock } from '../services/wakeLock';
+import { storageStream } from '../services/storageStream';
+import { streamServiceWorker } from '../services/streamServiceWorker';
 
 export type ActiveNavTab = 'nearby' | 'peer_detail' | 'shared' | 'rooms' | 'activity' | 'settings';
 
@@ -223,6 +226,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const transferChunksRef = useRef<Map<string, Blob[]>>(new Map());
   const streamChunksRef = useRef<Map<string, Blob[]>>(new Map());
   const streamRequestedChunksRef = useRef<Map<string, Map<number, number>>>(new Map());
+  const pendingRangeResolversRef = useRef<Map<string, { resolve: (res: any) => void; reject: (err: any) => void }>>(new Map());
 
   // Stable state mirrors for high-frequency packet listeners to prevent listener thrashing
   const currentDeviceRef = useRef<DeviceIdentity>(currentDevice);
@@ -298,6 +302,77 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       meshNetwork.unregisterFileProvider('local_blobs');
     };
+  }, []);
+
+  // Register Service Worker for HTTP 206 Range Proxy streaming & hook range requests
+  useEffect(() => {
+    streamServiceWorker.register();
+
+    streamServiceWorker.setRangeRequestHandler(async (req) => {
+      // 1. Check if resource is stored locally on this machine
+      let localBlob = localBlobsRef.current.get(req.resourceId);
+      if (!localBlob) {
+        for (const folders of Object.values(deviceSharedFoldersRef.current)) {
+          for (const f of folders) {
+            const found = f.resources.find((r) => r.id === req.resourceId);
+            if (found?.realFileBlob) {
+              localBlob = found.realFileBlob;
+              localBlobsRef.current.set(req.resourceId, localBlob);
+              break;
+            }
+          }
+          if (localBlob) break;
+        }
+      }
+
+      if (localBlob) {
+        const sliceEnd = Math.min(
+          localBlob.size,
+          req.end !== null && req.end !== undefined ? req.end + 1 : req.start + 524288
+        );
+        const slice = localBlob.slice(req.start, sliceEnd);
+        const arrayBuf = await slice.arrayBuffer();
+        let mime = localBlob.type || 'video/mp4';
+        if (!mime || mime === 'application/octet-stream') mime = 'video/mp4';
+        return {
+          buffer: arrayBuf,
+          totalSize: localBlob.size,
+          mimeType: mime,
+          start: req.start,
+          end: req.start + arrayBuf.byteLength - 1,
+        };
+      }
+
+      // 2. Fetch byte range from remote peer over WebRTC
+      if (!req.peerId) return null;
+      wakeLock.acquire('stream');
+
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pendingRangeResolversRef.current.delete(req.requestId);
+          resolve(null);
+        }, 12000);
+
+        pendingRangeResolversRef.current.set(req.requestId, {
+          resolve: (data) => {
+            clearTimeout(timer);
+            resolve(data);
+          },
+          reject: () => {
+            clearTimeout(timer);
+            resolve(null);
+          },
+        });
+
+        const rangePkt = meshNetwork.createPacket('STREAM_RANGE_REQUEST', currentDeviceRef.current, req.peerId, {
+          requestId: req.requestId,
+          resourceId: req.resourceId,
+          start: req.start,
+          end: req.end,
+        });
+        meshNetwork.sendPacket(rangePkt);
+      });
+    });
   }, []);
 
   // Nearby Peers
@@ -671,6 +746,9 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               const byteNumbers = base64ToUint8Array(dataBase64 || '');
               const chunkBlob = new Blob([byteNumbers.buffer as ArrayBuffer], { type: mimeType });
 
+              // Direct Disk / OPFS streaming: write straight to disk to prevent RAM buildup
+              storageStream.writeChunk(transferId, chunkIndex, byteNumbers);
+
               if (!transferChunksRef.current.has(transferId)) {
                 transferChunksRef.current.set(transferId, []);
               }
@@ -688,23 +766,43 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               let finalUrl: string | undefined;
 
               if (isComplete) {
-                const completeBlob = new Blob(chunks, { type: mimeType || 'application/octet-stream' });
-                finalUrl = URL.createObjectURL(completeBlob);
-                localBlobsRef.current.set(resourceId, completeBlob);
+                storageStream.finishStream(transferId).then((finishedFile) => {
+                  let fileUrl: string;
+                  if (finishedFile) {
+                    fileUrl = URL.createObjectURL(finishedFile);
+                    localBlobsRef.current.set(resourceId, finishedFile);
+                  } else {
+                    const completeBlob = new Blob(chunks, { type: mimeType || 'application/octet-stream' });
+                    fileUrl = URL.createObjectURL(completeBlob);
+                    localBlobsRef.current.set(resourceId, completeBlob);
+                  }
 
-                // Free RAM chunks memory once full blob is created
-                transferChunksRef.current.delete(transferId);
+                  // Free RAM chunks memory once completed
+                  transferChunksRef.current.delete(transferId);
 
-                // Trigger download
-                if (typeof window !== 'undefined') {
-                  const tRec = activeTransfersRef.current.find((t) => t.id === transferId);
-                  const a = document.createElement('a');
-                  a.href = finalUrl;
-                  a.download = tRec?.resourceName || 'downloaded_file';
-                  document.body.appendChild(a);
-                  a.click();
-                  document.body.removeChild(a);
-                }
+                  // Trigger download
+                  if (typeof window !== 'undefined') {
+                    const tRec = activeTransfersRef.current.find((t) => t.id === transferId);
+                    const a = document.createElement('a');
+                    a.href = fileUrl;
+                    a.download = tRec?.resourceName || 'downloaded_file';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                  }
+
+                  // Release wake lock if no more active transfers
+                  const stillActive = activeTransfersRef.current.filter(
+                    (t) => t.id !== transferId && t.status === 'transferring'
+                  );
+                  if (stillActive.length === 0) {
+                    wakeLock.release('transfer');
+                  }
+
+                  setActiveTransfers((prev) =>
+                    prev.map((t) => (t.id === transferId ? { ...t, downloadUrl: fileUrl } : t))
+                  );
+                });
               }
 
               setActiveTransfers((prev) =>
@@ -957,6 +1055,88 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               }
             } catch (err) {
               console.warn('[Stream Data] Assembly error:', err);
+            }
+          }
+          break;
+        }
+
+        // Service Worker HTTP 206 Range Proxy Interception (Instant seeking, 0 RAM overhead)
+        case 'STREAM_RANGE_REQUEST': {
+          if (packet.targetId === myDevice.id) {
+            const { requestId, resourceId, start = 0, end } = packet.payload;
+            let blob = localBlobsRef.current.get(resourceId);
+            if (!blob) {
+              for (const folders of Object.values(deviceSharedFoldersRef.current)) {
+                for (const f of folders) {
+                  const found = f.resources.find((r) => r.id === resourceId);
+                  if (found?.realFileBlob) {
+                    blob = found.realFileBlob;
+                    localBlobsRef.current.set(resourceId, blob);
+                    break;
+                  }
+                }
+                if (blob) break;
+              }
+            }
+
+            if (blob) {
+              const maxSliceSize = 1048576; // 1 MB max per slice
+              const requestedLength = end !== null && end !== undefined ? (end - start + 1) : 524288;
+              const sliceLen = Math.min(requestedLength, maxSliceSize);
+              const sliceEnd = Math.min(blob.size, start + sliceLen);
+              const slice = blob.slice(start, sliceEnd);
+
+              const fileReader = new FileReader();
+              fileReader.onload = () => {
+                const arrayBuf = fileReader.result as ArrayBuffer;
+                const dataBase64 = arrayBufferToBase64(arrayBuf);
+                let mime = blob.type || 'video/mp4';
+                if (!mime || mime === 'application/octet-stream') mime = 'video/mp4';
+
+                const rangeDataPkt = meshNetwork.createPacket('STREAM_RANGE_DATA', myDevice, packet.senderId, {
+                  requestId,
+                  resourceId,
+                  dataBase64,
+                  totalSize: blob.size,
+                  mimeType: mime,
+                  start,
+                  end: start + arrayBuf.byteLength - 1,
+                });
+                meshNetwork.sendPacket(rangeDataPkt);
+              };
+              fileReader.readAsArrayBuffer(slice);
+            } else {
+              const errPkt = meshNetwork.createPacket('STREAM_RANGE_DATA', myDevice, packet.senderId, {
+                requestId,
+                resourceId,
+                error: 'Resource not found',
+                totalSize: 0,
+                dataBase64: '',
+              });
+              meshNetwork.sendPacket(errPkt);
+            }
+          }
+          break;
+        }
+
+        case 'STREAM_RANGE_DATA': {
+          if (packet.targetId === myDevice.id) {
+            const { requestId, dataBase64, totalSize, mimeType, start, end, error } = packet.payload;
+            const resolver = pendingRangeResolversRef.current.get(requestId);
+            if (resolver) {
+              pendingRangeResolversRef.current.delete(requestId);
+              if (error || !dataBase64) {
+                resolver.reject(new Error(error || 'Range data empty'));
+              } else {
+                const uint8 = base64ToUint8Array(dataBase64);
+                resolver.resolve({
+                  buffer: uint8.buffer,
+                  totalSize,
+                  mimeType: mimeType || 'video/mp4',
+                  start,
+                  end,
+                });
+              }
             }
           }
           break;
@@ -1428,7 +1608,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return [];
   }, [deviceSharedFolders]);
 
-  // Real Progressive File Transfer Engine
+  // Real Progressive File Transfer Engine with OPFS Save Points & Zero-RAM Disk Streaming
   const startDownload = useCallback((peerId: string, resource: VirtualResource) => {
     const peer = nearbyPeers.find((p) => p.id === peerId);
     if (!peer) return;
@@ -1450,6 +1630,14 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const totalChunks = Math.max(1, Math.ceil(resource.sizeBytes / chunkSize));
     const transferId = generateRandomId('xfer');
 
+    // Screen Wake Lock API: Prevent mobile/desktop sleep during active download
+    wakeLock.acquire('transfer');
+
+    // Origin Private File System (OPFS): Check for saved draft chunks after page refresh
+    const resumeInfo = storageStream.getResumeInfo(resource.id);
+    const initialReceivedChunks = resumeInfo?.receivedChunks || [];
+    const isResume = initialReceivedChunks.length > 0;
+
     // Check if we have it locally or if it has a small data URL
     const localBlob = localBlobsRef.current.get(resource.id);
     let downloadUrl: string | undefined;
@@ -1460,17 +1648,22 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     const isInstant = Boolean(downloadUrl);
+    const initialBytesTransferred = isInstant
+      ? resource.sizeBytes
+      : isResume
+      ? Math.min(resource.sizeBytes, initialReceivedChunks.length * chunkSize)
+      : 0;
 
     const newTransfer: TransferSession = {
       id: transferId,
       resourceId: resource.id,
       resourceName: resource.name,
       fileSizeBytes: resource.sizeBytes,
-      bytesTransferred: isInstant ? resource.sizeBytes : 0,
+      bytesTransferred: initialBytesTransferred,
       chunkSize,
       totalChunks,
-      currentChunk: isInstant ? totalChunks : 0,
-      receivedChunkCount: isInstant ? totalChunks : 0,
+      currentChunk: isInstant ? totalChunks : initialReceivedChunks.length,
+      receivedChunkCount: isInstant ? totalChunks : initialReceivedChunks.length,
       highestRequestedChunk: isInstant ? totalChunks : Math.min(totalChunks, 8),
       transportType: peer.transportType || 'cloud_relay',
       speedMbps: peer.transportType === 'webrtc_direct' ? 92.4 : 34.5,
@@ -1489,8 +1682,10 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     logActivity({
       type: 'transfer',
       level: 'info',
-      title: 'File Transfer Dispatched',
-      details: `Streaming ${resource.name} (${(resource.sizeBytes / 1024 / 1024).toFixed(1)} MB) from ${peer.name} via ${peer.transportType === 'webrtc_direct' ? 'Direct P2P' : 'Mesh Relay'}`,
+      title: isResume ? 'P2P Transfer Resumed from OPFS' : 'File Transfer Dispatched',
+      details: isResume
+        ? `Resuming ${resource.name} from OPFS disk save point (${initialReceivedChunks.length}/${totalChunks} chunks).`
+        : `Streaming ${resource.name} (${(resource.sizeBytes / 1024 / 1024).toFixed(1)} MB) from ${peer.name} via ${peer.transportType === 'webrtc_direct' ? 'Direct P2P' : 'Mesh Relay'}`,
       peerId,
       peerName: peer.name,
       resourceId: resource.id,
@@ -1503,20 +1698,32 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
+      wakeLock.release('transfer');
     } else {
-      // Dispatch initial sliding window of 48 KB chunks (8 on direct WebRTC, 4 on relay)
       transferChunksRef.current.set(transferId, []);
+
+      // Direct-to-Disk Stream: FileSystemWritableFileStream on Chromium, or OPFS virtual disk
+      storageStream.createDirectDiskStream(transferId, resource, chunkSize).then((session) => {
+        if (!session) {
+          storageStream.createOpfsStream(transferId, resource, chunkSize);
+        }
+      });
+
+      // Dispatch initial sliding window of missing chunks
       const windowSize = peer.transportType === 'webrtc_direct' ? 8 : 4;
-      const initialWindow = Math.min(totalChunks, windowSize);
-      for (let c = 0; c < initialWindow; c++) {
-        const pkt = meshNetwork.createPacket('CHUNK_REQUEST', currentDevice, peerId, {
-          resourceId: resource.id,
-          transferId,
-          chunkIndex: c,
-          chunkSize,
-          totalChunks,
-        });
-        meshNetwork.sendPacket(pkt);
+      let requested = 0;
+      for (let c = 0; c < totalChunks && requested < windowSize; c++) {
+        if (!initialReceivedChunks.includes(c)) {
+          const pkt = meshNetwork.createPacket('CHUNK_REQUEST', currentDevice, peerId, {
+            resourceId: resource.id,
+            transferId,
+            chunkIndex: c,
+            chunkSize,
+            totalChunks,
+          });
+          meshNetwork.sendPacket(pkt);
+          requested++;
+        }
       }
     }
   }, [currentDevice, nearbyPeers, logActivity]);
@@ -1533,11 +1740,17 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
       meshNetwork.sendPacket(pkt);
     }
+    const stillActive = activeTransfersRef.current.filter((t) => t.id !== transferId && t.status === 'transferring');
+    if (stillActive.length === 0) {
+      wakeLock.release('transfer');
+    }
   }, [currentDevice]);
 
   const resumeTransfer = useCallback((transferId: string) => {
     const target = activeTransfersRef.current.find((t) => t.id === transferId);
     if (!target) return;
+
+    wakeLock.acquire('transfer');
 
     setActiveTransfers((prev) =>
       prev.map((t) => (t.id === transferId ? { ...t, status: 'transferring' } : t))
@@ -1578,12 +1791,17 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       meshNetwork.sendPacket(pkt);
     }
     transferChunksRef.current.delete(transferId);
+    storageStream.cancelStream(transferId);
     setActiveTransfers((prev) =>
       prev.map((t) => (t.id === transferId ? { ...t, status: 'cancelled' } : t))
     );
+    const stillActive = activeTransfersRef.current.filter((t) => t.id !== transferId && t.status === 'transferring');
+    if (stillActive.length === 0) {
+      wakeLock.release('transfer');
+    }
   }, [currentDevice]);
 
-  // Media Streaming Engine: Progressive Burst Slicing without Fake Buffer Intervals
+  // Media Streaming Engine: Service Worker HTTP 206 Range Proxy with Screen Wake Lock
   const startDirectStream = useCallback((peerId: string, resource: VirtualResource) => {
     const peer = nearbyPeers.find((p) => p.id === peerId);
     if (!peer) return;
@@ -1608,9 +1826,14 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       mediaUrl = URL.createObjectURL(localBlob);
     } else if (resource.previewUrl && resource.previewUrl.startsWith('data:')) {
       mediaUrl = resource.previewUrl;
+    } else {
+      // Connect to Service Worker Range Proxy: instant progressive playback without RAM buildup
+      mediaUrl = streamServiceWorker.getVirtualStreamUrl(peer.id, resource.id, resource.name);
     }
 
-    const isInstant = Boolean(mediaUrl);
+    // Screen Wake Lock API: Prevent mobile screen sleep during media streaming
+    wakeLock.acquire('stream');
+
     const newStream: StreamSession = {
       id: sessionId,
       resourceId: resource.id,
@@ -1619,11 +1842,11 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       peerName: peer.name,
       mimeType: resource.mimeType || 'video/mp4',
       totalSizeBytes: resource.sizeBytes,
-      bufferedBytes: isInstant ? resource.sizeBytes : 0,
+      bufferedBytes: resource.sizeBytes,
       rangeOffsetBytes: 0,
       currentPositionSeconds: 0,
       durationSeconds: resource.durationSeconds || 180,
-      status: isInstant ? 'streaming' : 'buffering',
+      status: 'streaming',
       requestCount: 1,
       speedKbps: peer.transportType === 'webrtc_direct' ? 48000 : 18400,
       mediaUrl,
@@ -1638,31 +1861,11 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       type: 'stream',
       level: 'success',
       title: 'P2P Direct Stream Initiated',
-      details: `Streaming ${resource.name} directly from ${peer.name} without prior download.`,
+      details: `Streaming ${resource.name} via HTTP 206 Range Proxy from ${peer.name} without prior download.`,
       peerId,
       peerName: peer.name,
       resourceId: resource.id,
     });
-
-    if (!isInstant) {
-      const chunkSize = 49152;
-      const totalChunks = Math.max(1, Math.ceil(resource.sizeBytes / chunkSize));
-      const windowSize = peer.transportType === 'webrtc_direct' ? 12 : 6;
-      const initialWindow = Math.min(totalChunks, windowSize);
-      const reqMap = streamRequestedChunksRef.current.get(sessionId)!;
-      const now = Date.now();
-      for (let c = 0; c < initialWindow; c++) {
-        reqMap.set(c, now);
-        const pkt = meshNetwork.createPacket('STREAM_CHUNK_REQUEST', currentDevice, peerId, {
-          sessionId,
-          resourceId: resource.id,
-          chunkIndex: c,
-          chunkSize,
-          totalChunks,
-        });
-        meshNetwork.sendPacket(pkt);
-      }
-    }
   }, [currentDevice, nearbyPeers, logActivity]);
 
   const requestImagePreview = useCallback((peerId: string, resourceId: string) => {
@@ -1673,10 +1876,12 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [currentDevice]);
 
   const pauseStream = useCallback(() => {
+    wakeLock.release('stream');
     setActiveStream((curr) => (curr ? { ...curr, status: 'paused' } : null));
   }, []);
 
   const resumeStream = useCallback(() => {
+    wakeLock.acquire('stream');
     setActiveStream((curr) => (curr ? { ...curr, status: 'streaming' } : null));
   }, []);
 
@@ -1705,9 +1910,11 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [currentDevice]);
 
   const closeStream = useCallback(() => {
+    wakeLock.release('stream');
     setActiveStream((curr) => {
       if (curr) {
         streamChunksRef.current.delete(curr.id);
+        streamRequestedChunksRef.current.delete(curr.id);
       }
       return null;
     });
