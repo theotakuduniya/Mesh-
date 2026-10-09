@@ -148,6 +148,8 @@ export const SharedSpaceView: React.FC = () => {
         previewUrl = await generateImageThumbnail(file);
       } else if (file.size <= 100 * 1024) {
         previewUrl = await readFileAsDataUrl(file);
+      } else if (isStreamable) {
+        previewUrl = URL.createObjectURL(file);
       }
 
       let checksum = 'sha256_computing';

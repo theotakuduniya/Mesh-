@@ -32,6 +32,7 @@ class StreamServiceWorkerManager {
   private handler: RangeRequestHandler | null = null;
   private isReady = false;
   private wakeLockIdleTimer: any = null;
+  private handledRequests = new Set<string>();
 
   constructor() {
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -91,6 +92,13 @@ class StreamServiceWorkerManager {
     const isRequest = data.type === 'RANGE_REQUEST' || data.type === 'READ_CHUNK' || data.action === 'READ_CHUNK';
     if (!isRequest) return;
 
+    if (this.handledRequests.has(data.requestId)) return;
+    this.handledRequests.add(data.requestId);
+    if (this.handledRequests.size > 200) {
+      const oldest = this.handledRequests.values().next().value;
+      if (oldest) this.handledRequests.delete(oldest);
+    }
+
     if (!this.handler) {
       this.sendError(data.requestId, 'No client range handler registered');
       return;
@@ -106,7 +114,11 @@ class StreamServiceWorkerManager {
     }, 15000);
 
     try {
-      const response = await this.handler(data);
+      let response = await this.handler(data);
+      if (!response) {
+        await new Promise((r) => setTimeout(r, 250));
+        response = await this.handler(data);
+      }
       if (!response) {
         this.sendError(data.requestId, 'Range not found');
         return;

@@ -610,22 +610,23 @@ export class MeshNetworkEngine {
     // If targeted and direct WebRTC DataChannel is open, send direct via DataChannel with backpressure queue
     if (packet.targetId && packet.targetId !== 'all') {
       const dc = this.dataChannels.get(packet.targetId);
+      // Small signaling & control packets (<128KB) are sent over direct DataChannel
       if (dc && dc.readyState === 'open') {
         const payloadStr = JSON.stringify(packet);
-        if (dc.bufferedAmount <= MeshNetworkEngine.DC_HIGH_WATER_MARK) {
+        if (payloadStr.length <= 131072 && dc.bufferedAmount <= MeshNetworkEngine.DC_HIGH_WATER_MARK) {
           try {
             dc.send(payloadStr);
             return;
           } catch (e) {
-            console.warn('[WebRTC DC] send error, queueing:', e);
+            console.warn('[WebRTC DC] send error, falling back to relay:', e);
           }
+        } else if (payloadStr.length <= 131072) {
+          if (!this.dcQueues.has(packet.targetId)) {
+            this.dcQueues.set(packet.targetId, []);
+          }
+          this.dcQueues.get(packet.targetId)!.push(payloadStr);
+          return;
         }
-        // Buffer frame in dcQueues and wait for dc.onbufferedamountlow
-        if (!this.dcQueues.has(packet.targetId)) {
-          this.dcQueues.set(packet.targetId, []);
-        }
-        this.dcQueues.get(packet.targetId)!.push(payloadStr);
-        return;
       }
     }
 

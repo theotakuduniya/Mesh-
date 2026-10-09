@@ -6,7 +6,7 @@
  * HTTP 206 Partial Content responses to enable instant seeking and progressive chunked streaming.
  */
 
-const SW_VERSION = 'v1.2.0';
+const SW_VERSION = 'v1.2.1';
 const VIRTUAL_STREAM_KEYWORD = '/virtual-stream';
 
 self.addEventListener('install', (event) => {
@@ -83,6 +83,7 @@ async function handleVirtualStreamRangeRequest(event) {
   // 1. /virtual-stream/video.mp4?peerId=...&resourceId=...
   // 2. /virtual-stream/:peerId/:resourceId/:filename
   // 3. /virtual-stream/video.mp4
+  // 4. /virtual-stream/:filename
   let peerId = url.searchParams.get('peerId') || '';
   let resourceId = url.searchParams.get('resourceId') || '';
   let filename = url.searchParams.get('filename') || 'video.mp4';
@@ -91,10 +92,14 @@ async function handleVirtualStreamRangeRequest(event) {
   const subPath = url.pathname.slice(prefixIndex + VIRTUAL_STREAM_KEYWORD.length).replace(/^\/+/, '');
   const parts = subPath ? subPath.split('/') : [];
 
-  if (parts.length >= 2 && !peerId && !resourceId) {
+  if (parts.length >= 3 && !peerId && !resourceId) {
     peerId = decodeURIComponent(parts[0] || '');
     resourceId = decodeURIComponent(parts[1] || '');
     filename = decodeURIComponent(parts.slice(2).join('/') || 'video.mp4');
+  } else if (parts.length === 2 && !peerId && !resourceId) {
+    peerId = decodeURIComponent(parts[0] || '');
+    resourceId = decodeURIComponent(parts[1] || '');
+    filename = resourceId;
   } else if (parts.length === 1 && !resourceId) {
     filename = decodeURIComponent(parts[0] || 'video.mp4');
     resourceId = filename;
@@ -121,15 +126,31 @@ async function handleVirtualStreamRangeRequest(event) {
   const requestId = 'chunk_' + Math.random().toString(36).slice(2) + '_' + Date.now();
 
   try {
-    const responseData = await requestChunkFromPeerClient({
-      requestId,
-      peerId,
-      resourceId,
-      filename,
-      start,
-      end,
-      rangeHeader,
-    }, event.clientId);
+    let responseData;
+    try {
+      responseData = await requestChunkFromPeerClient({
+        requestId,
+        peerId,
+        resourceId,
+        filename,
+        start,
+        end,
+        rangeHeader,
+      }, event.clientId);
+    } catch (firstErr) {
+      // Retry once after 350ms in case peer connection or blob discovery was briefly busy
+      await new Promise((r) => setTimeout(r, 350));
+      const retryId = 'retry_' + requestId;
+      responseData = await requestChunkFromPeerClient({
+        requestId: retryId,
+        peerId,
+        resourceId,
+        filename,
+        start,
+        end,
+        rangeHeader,
+      }, event.clientId);
+    }
 
     // Normalize buffer to ArrayBuffer
     let chunkBuffer = responseData.buffer;
@@ -176,39 +197,32 @@ function requestChunkFromPeerClient(payload, clientId) {
     const timer = setTimeout(() => {
       pendingRequests.delete(payload.requestId);
       reject(new Error(`READ_CHUNK request timeout for ${payload.filename} (range: ${payload.start}-${payload.end})`));
-    }, 15000);
+    }, 16000);
 
     pendingRequests.set(payload.requestId, { resolve, reject, timer });
 
     const message = {
       type: 'READ_CHUNK',
-      // Also include RANGE_REQUEST for backward compatibility
       action: 'READ_CHUNK',
       rangeType: 'RANGE_REQUEST',
       ...payload,
     };
 
-    // 1. Post to BroadcastChannel
+    // 1. Post to BroadcastChannel if supported
     if (channel) {
       channel.postMessage(message);
     }
 
-    // 2. Post directly to requesting client or all matching clients
+    // 2. Broadcast to client windows to guarantee receipt in all contexts
     if (clientId && self.clients) {
       self.clients.get(clientId).then((client) => {
-        if (client) {
-          client.postMessage(message);
-        }
+        if (client) client.postMessage(message);
       }).catch(() => {});
     }
-
-    // 3. Fallback broadcast to all active window clients
     if (self.clients) {
       self.clients.matchAll({ type: 'window' }).then((clients) => {
         clients.forEach((c) => {
-          if (!clientId || c.id !== clientId) {
-            c.postMessage(message);
-          }
+          if (c.id !== clientId) c.postMessage(message);
         });
       }).catch(() => {});
     }

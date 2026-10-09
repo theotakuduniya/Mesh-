@@ -884,7 +884,13 @@ export const PeerDetailView: React.FC = () => {
             {(previewResource.type === 'video' || previewResource.mimeType.startsWith('video/')) && (
               <div className="rounded-xl overflow-hidden bg-black border border-purple-500/30 flex flex-col items-center justify-center relative shadow-xl">
                 <video
-                  src={streamServiceWorker.getVirtualStreamUrl(peer.id, previewResource.id, previewResource.name)}
+                  src={
+                    previewResource.realFileBlob
+                      ? URL.createObjectURL(previewResource.realFileBlob)
+                      : previewResource.previewUrl && (previewResource.previewUrl.startsWith('blob:') || previewResource.previewUrl.startsWith('data:'))
+                      ? previewResource.previewUrl
+                      : streamServiceWorker.getVirtualStreamUrl(peer.id, previewResource.id, previewResource.name)
+                  }
                   controls
                   autoPlay
                   playsInline

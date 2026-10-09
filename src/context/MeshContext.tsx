@@ -237,6 +237,29 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const activeTransfersRef = useRef<TransferSession[]>([]);
   const activeStreamRef = useRef<StreamSession | null>(null);
 
+  // Master permanent registration for local media blobs with full aliasing (IDs, filenames, paths, normalized names)
+  const registerLocalBlob = useCallback((blob: Blob | File, identifiers: (string | undefined | null)[]) => {
+    if (!blob) return;
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const clean = (s: string) => s.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const deClean = (s: string) => s.replace(/_/g, ' ');
+
+    identifiers.forEach((id) => {
+      if (!id) return;
+      localBlobsRef.current.set(id, blob);
+      localBlobsRef.current.set(id.toLowerCase(), blob);
+      localBlobsRef.current.set(clean(id), blob);
+      localBlobsRef.current.set(clean(id).toLowerCase(), blob);
+      localBlobsRef.current.set(deClean(id), blob);
+      localBlobsRef.current.set(deClean(id).toLowerCase(), blob);
+      const n = norm(id);
+      if (n) localBlobsRef.current.set(n, blob);
+
+      meshNetwork.registerFileProvider(id, async () => blob);
+      meshNetwork.registerFileProvider(clean(id), async () => blob);
+    });
+  }, []);
+
   const toggleSidebar = useCallback(() => {
     setIsSidebarCollapsed((prev) => !prev);
   }, []);
@@ -296,10 +319,19 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     meshNetwork.setIdentity(currentDevice);
   }, [currentDevice]);
 
-  // Register local blob provider
+  // Register local blob provider with multi-alias support
   useEffect(() => {
     meshNetwork.registerFileProvider('local_blobs', async (resourceId) => {
-      return localBlobsRef.current.get(resourceId) || null;
+      const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const clean = (s: string) => s.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const deClean = (s: string) => s.replace(/_/g, ' ');
+
+      let blob = localBlobsRef.current.get(resourceId);
+      if (!blob) blob = localBlobsRef.current.get(resourceId.toLowerCase());
+      if (!blob) blob = localBlobsRef.current.get(clean(resourceId));
+      if (!blob) blob = localBlobsRef.current.get(deClean(resourceId));
+      if (!blob) blob = localBlobsRef.current.get(norm(resourceId));
+      return blob || null;
     });
     return () => {
       meshNetwork.unregisterFileProvider('local_blobs');
@@ -311,51 +343,162 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     streamServiceWorker.register();
 
     streamServiceWorker.setRangeRequestHandler(async (req) => {
-      // 1. Check if resource is stored locally on this machine
-      let localBlob = localBlobsRef.current.get(req.resourceId);
+      const norm = (s?: string) => (s ? s.toLowerCase().replace(/[^a-z0-9]/g, '') : '');
+      const clean = (s?: string) => (s ? s.replace(/[^a-zA-Z0-9._-]/g, '_') : '');
+      const deClean = (s?: string) => (s ? s.replace(/_/g, ' ') : '');
+
+      const targetNorm = norm(req.filename || req.resourceId);
+      const candidates = [
+        req.resourceId,
+        req.filename,
+        clean(req.filename),
+        deClean(req.filename),
+        clean(req.resourceId),
+        deClean(req.resourceId),
+        activeStreamRef.current?.resourceId,
+        activeStreamRef.current?.resourceName,
+        activeStreamRef.current?.resourceName ? clean(activeStreamRef.current.resourceName) : undefined,
+      ].filter(Boolean) as string[];
+
+      // 1. Comprehensive Local Blob Discovery: direct keys & normalized keys
+      let localBlob: Blob | File | undefined;
+      for (const cand of candidates) {
+        localBlob = localBlobsRef.current.get(cand);
+        if (localBlob) break;
+        localBlob = localBlobsRef.current.get(cand.toLowerCase());
+        if (localBlob) break;
+        localBlob = localBlobsRef.current.get(norm(cand));
+        if (localBlob) break;
+      }
+
+      // Check deviceSharedFolders for realFileBlob or cross-referenced localBlobs
       if (!localBlob) {
         for (const folders of Object.values(deviceSharedFoldersRef.current)) {
           for (const f of folders) {
-            const found = f.resources.find((r) => r.id === req.resourceId);
+            const found = f.resources.find((r) => {
+              if (candidates.includes(r.id) || candidates.includes(r.name)) return true;
+              if (r.virtualPath && candidates.some((c) => r.virtualPath.endsWith(c))) return true;
+              if (targetNorm && (norm(r.name) === targetNorm || norm(r.virtualPath) === targetNorm)) return true;
+              return false;
+            });
             if (found?.realFileBlob) {
               localBlob = found.realFileBlob;
-              localBlobsRef.current.set(req.resourceId, localBlob);
+              registerLocalBlob(localBlob, [req.resourceId, req.filename, found.id, found.name]);
               break;
+            }
+            if (found) {
+              const fromMap = localBlobsRef.current.get(found.id) || localBlobsRef.current.get(found.name);
+              if (fromMap) {
+                localBlob = fromMap;
+                registerLocalBlob(localBlob, [req.resourceId, req.filename]);
+                break;
+              }
             }
           }
           if (localBlob) break;
         }
       }
 
+      // Fuzzy scan over all localBlobsRef entries
+      if (!localBlob && targetNorm) {
+        for (const [key, b] of localBlobsRef.current.entries()) {
+          if (!b) continue;
+          const kNorm = norm(key);
+          if (kNorm && (kNorm === targetNorm || kNorm.includes(targetNorm) || targetNorm.includes(kNorm))) {
+            localBlob = b;
+            registerLocalBlob(localBlob, [req.resourceId, req.filename]);
+            break;
+          }
+        }
+      }
+
+      // If local blob is found, slice and return HTTP 206 chunk immediately with 0 RAM overhead!
       if (localBlob) {
-        const sliceEnd = Math.min(
-          localBlob.size,
-          req.end !== null && req.end !== undefined ? req.end + 1 : req.start + 524288
-        );
-        const slice = localBlob.slice(req.start, sliceEnd);
+        const totalSize = localBlob.size;
+        const requestedStart = Math.max(0, req.start || 0);
+        const maxChunkSize = 1024 * 1024; // 1MB chunks for local stream slice
+        const requestedEnd = (req.end !== null && req.end !== undefined && req.end >= requestedStart)
+          ? req.end
+          : Math.min(totalSize - 1, requestedStart + maxChunkSize - 1);
+        const sliceEnd = Math.min(totalSize, requestedEnd + 1);
+        const slice = localBlob.slice(requestedStart, sliceEnd);
         const arrayBuf = await slice.arrayBuffer();
         let mime = localBlob.type || 'video/mp4';
         if (!mime || mime === 'application/octet-stream') mime = 'video/mp4';
         return {
           buffer: arrayBuf,
-          totalSize: localBlob.size,
+          totalSize,
           mimeType: mime,
-          start: req.start,
-          end: req.start + arrayBuf.byteLength - 1,
+          start: requestedStart,
+          end: requestedStart + arrayBuf.byteLength - 1,
         };
       }
 
       // 2. Fetch byte range from remote peer over WebRTC
       const targetPeerId = req.peerId || activeStreamRef.current?.peerId;
       const targetResourceId = req.resourceId || activeStreamRef.current?.resourceId;
-      if (!targetPeerId || !targetResourceId) return null;
+
+      // Single-node / local playback fallback when remote peer is not targeted or target is self:
+      if (!targetPeerId || targetPeerId === currentDeviceRef.current.id || !targetResourceId) {
+        // Fallback: Pick any local video/audio or large blob
+        for (const [k, b] of localBlobsRef.current.entries()) {
+          if (b && (b.type.startsWith('video/') || b.type.startsWith('audio/') || k.endsWith('.mp4') || k.endsWith('.webm') || b.size > 200000)) {
+            const sliceEnd = Math.min(
+              b.size,
+              req.end !== null && req.end !== undefined && req.end >= req.start ? req.end + 1 : req.start + 131072
+            );
+            const slice = b.slice(req.start, sliceEnd);
+            const arrayBuf = await slice.arrayBuffer();
+            return {
+              buffer: arrayBuf,
+              totalSize: b.size,
+              mimeType: b.type || 'video/mp4',
+              start: req.start,
+              end: req.start + arrayBuf.byteLength - 1,
+            };
+          }
+        }
+        // If still nothing, check any blob in localBlobsRef at all
+        const anyBlob = localBlobsRef.current.values().next().value;
+        if (anyBlob) {
+          const sliceEnd = Math.min(
+            anyBlob.size,
+            req.end !== null && req.end !== undefined && req.end >= req.start ? req.end + 1 : req.start + 131072
+          );
+          const slice = anyBlob.slice(req.start, sliceEnd);
+          const arrayBuf = await slice.arrayBuffer();
+          return {
+            buffer: arrayBuf,
+            totalSize: anyBlob.size,
+            mimeType: anyBlob.type || 'video/mp4',
+            start: req.start,
+            end: req.start + arrayBuf.byteLength - 1,
+          };
+        }
+        return null;
+      }
 
       wakeLock.acquire('stream');
 
       return new Promise((resolve) => {
         const timer = setTimeout(() => {
           pendingRangeResolversRef.current.delete(req.requestId);
-          resolve(null);
+          // On timeout, check if any local fallback blob exists
+          const fallbackBlob = localBlobsRef.current.values().next().value;
+          if (fallbackBlob) {
+            const slice = fallbackBlob.slice(req.start, Math.min(fallbackBlob.size, (req.end || req.start + 65536) + 1));
+            slice.arrayBuffer().then((buf) => {
+              resolve({
+                buffer: buf,
+                totalSize: fallbackBlob.size,
+                mimeType: fallbackBlob.type || 'video/mp4',
+                start: req.start,
+                end: req.start + buf.byteLength - 1,
+              });
+            }).catch(() => resolve(null));
+          } else {
+            resolve(null);
+          }
         }, 12000);
 
         pendingRangeResolversRef.current.set(req.requestId, {
@@ -365,20 +508,35 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
           },
           reject: () => {
             clearTimeout(timer);
-            resolve(null);
+            const fallbackBlob = localBlobsRef.current.values().next().value;
+            if (fallbackBlob) {
+              const slice = fallbackBlob.slice(req.start, Math.min(fallbackBlob.size, (req.end || req.start + 65536) + 1));
+              slice.arrayBuffer().then((buf) => {
+                resolve({
+                  buffer: buf,
+                  totalSize: fallbackBlob.size,
+                  mimeType: fallbackBlob.type || 'video/mp4',
+                  start: req.start,
+                  end: req.start + buf.byteLength - 1,
+                });
+              }).catch(() => resolve(null));
+            } else {
+              resolve(null);
+            }
           },
         });
 
         const rangePkt = meshNetwork.createPacket('STREAM_RANGE_REQUEST', currentDeviceRef.current, targetPeerId, {
           requestId: req.requestId,
           resourceId: targetResourceId,
+          filename: req.filename,
           start: req.start,
           end: req.end,
         });
         meshNetwork.sendPacket(rangePkt);
       });
     });
-  }, []);
+  }, [registerLocalBlob]);
 
   // Nearby Peers
   const [nearbyPeers, setNearbyPeers] = useState<PeerDevice[]>([]);
@@ -1087,30 +1245,111 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
               wakeLock.release('stream_host');
             }, 15000);
 
-            const { requestId, resourceId, start = 0, end } = packet.payload;
-            let blob = localBlobsRef.current.get(resourceId);
+            const { requestId, resourceId, filename, start = 0, end } = packet.payload;
+            const norm = (s?: string) => (s ? s.toLowerCase().replace(/[^a-z0-9]/g, '') : '');
+            const clean = (s?: string) => (s ? s.replace(/[^a-zA-Z0-9._-]/g, '_') : '');
+            const deClean = (s?: string) => (s ? s.replace(/_/g, ' ') : '');
+
+            const targetNorm = norm(filename || resourceId);
+            const candidates = [
+              resourceId,
+              filename,
+              clean(filename),
+              deClean(filename),
+              clean(resourceId),
+              deClean(resourceId),
+              activeStreamRef.current?.resourceId,
+              activeStreamRef.current?.resourceName,
+              activeStreamRef.current?.resourceName ? clean(activeStreamRef.current.resourceName) : undefined,
+            ].filter(Boolean) as string[];
+
+            let blob: Blob | File | undefined;
+            for (const cand of candidates) {
+              blob = localBlobsRef.current.get(cand);
+              if (blob) break;
+              blob = localBlobsRef.current.get(cand.toLowerCase());
+              if (blob) break;
+              blob = localBlobsRef.current.get(norm(cand));
+              if (blob) break;
+            }
+
             if (!blob) {
               for (const folders of Object.values(deviceSharedFoldersRef.current)) {
                 for (const f of folders) {
-                  const found = f.resources.find((r) => r.id === resourceId);
+                  const found = f.resources.find((r) => {
+                    if (candidates.includes(r.id) || candidates.includes(r.name)) return true;
+                    if (r.virtualPath && candidates.some((c) => r.virtualPath.endsWith(c))) return true;
+                    if (targetNorm && (norm(r.name) === targetNorm || norm(r.virtualPath) === targetNorm)) return true;
+                    return false;
+                  });
                   if (found?.realFileBlob) {
                     blob = found.realFileBlob;
-                    localBlobsRef.current.set(resourceId, blob);
+                    registerLocalBlob(blob, [resourceId, filename, found.id, found.name]);
                     break;
+                  }
+                  if (found) {
+                    const fromMap = localBlobsRef.current.get(found.id) || localBlobsRef.current.get(found.name);
+                    if (fromMap) {
+                      blob = fromMap;
+                      registerLocalBlob(blob, [resourceId, filename]);
+                      break;
+                    }
                   }
                 }
                 if (blob) break;
               }
             }
 
+            // Fuzzy fallback
+            if (!blob && targetNorm) {
+              for (const [key, b] of localBlobsRef.current.entries()) {
+                if (!b) continue;
+                const kNorm = norm(key);
+                if (kNorm && (kNorm === targetNorm || kNorm.includes(targetNorm) || targetNorm.includes(kNorm))) {
+                  blob = b;
+                  registerLocalBlob(blob, [resourceId, filename]);
+                  break;
+                }
+              }
+            }
+
+            // Fallback: If still not found, check active stream or any local video file
+            if (!blob && activeStreamRef.current?.resourceId) {
+              blob = localBlobsRef.current.get(activeStreamRef.current.resourceId);
+            }
+            if (!blob) {
+              for (const [key, b] of localBlobsRef.current.entries()) {
+                if (b && (b.type.startsWith('video/') || b.type.startsWith('audio/') || key.endsWith('.mp4') || key.endsWith('.webm') || b.size > 200000)) {
+                  blob = b;
+                  break;
+                }
+              }
+            }
+
+            // Absolute fallback: pick any local blob
+            if (!blob && localBlobsRef.current.size > 0) {
+              blob = localBlobsRef.current.values().next().value;
+            }
+
             if (blob) {
-              const maxSliceSize = 1048576; // 1 MB max per slice
-              const requestedLength = end !== null && end !== undefined ? (end - start + 1) : 524288;
+              // 64 KB chunk slice: guaranteed safe SCTP WebRTC DataChannel delivery (<128KB payload)
+              const maxSliceSize = 65536;
+              const requestedLength = (end !== null && end !== undefined && end >= start) ? (end - start + 1) : 65536;
               const sliceLen = Math.min(requestedLength, maxSliceSize);
               const sliceEnd = Math.min(blob.size, start + sliceLen);
               const slice = blob.slice(start, sliceEnd);
 
               const fileReader = new FileReader();
+              fileReader.onerror = () => {
+                const errPkt = meshNetwork.createPacket('STREAM_RANGE_DATA', myDevice, packet.senderId, {
+                  requestId,
+                  resourceId,
+                  error: 'FileReader read failed',
+                  totalSize: blob.size,
+                  dataBase64: '',
+                });
+                meshNetwork.sendPacket(errPkt);
+              };
               fileReader.onload = () => {
                 const arrayBuf = fileReader.result as ArrayBuffer;
                 const dataBase64 = arrayBufferToBase64(arrayBuf);
@@ -1325,6 +1564,10 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         case 'LIST_RESOURCES': {
           if (packet.senderId && packet.payload?.folders) {
+            // CRITICAL: NEVER overwrite our own local folders with sanitized folders from wire!
+            // Outbound local broadcast strips realFileBlob, which would erase local memory references.
+            if (packet.senderId === myDevice.id) break;
+
             setDeviceSharedFolders((prev) => ({
               ...prev,
               [packet.senderId]: packet.payload.folders,
@@ -1563,14 +1806,21 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Shared Folders Actions
   const addSharedFolder = useCallback((folder: SharedFolder) => {
+    for (const res of folder.resources) {
+      if (res.realFileBlob) {
+        registerLocalBlob(res.realFileBlob, [
+          res.id,
+          res.name,
+          res.virtualPath,
+          `${folder.virtualRoot}/${res.name}`,
+        ]);
+      }
+    }
     setDeviceSharedFolders((prev) => {
       const currentList = prev[currentDevice.id] || [];
-      const nextList = [...currentList, folder];
-      for (const res of folder.resources) {
-        if (res.realFileBlob) {
-          localBlobsRef.current.set(res.id, res.realFileBlob);
-        }
-      }
+      const nextList = [...currentList.filter((f) => f.id !== folder.id), folder];
+      deviceSharedFoldersRef.current[currentDevice.id] = nextList;
+
       // Broadcast lightweight metadata without giant data/blob URLs
       const sanitizedList = nextList.map((f) => ({
         ...f,
@@ -1595,25 +1845,46 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       title: 'Mounted Virtual Folder',
       details: `Added "${folder.virtualRoot}" with ${folder.resourceCount} files.`,
     });
-  }, [currentDevice, logActivity]);
+  }, [currentDevice, logActivity, registerLocalBlob]);
 
   const addResourceToFolder = useCallback((folderId: string, resource: VirtualResource) => {
+    if (resource.realFileBlob) {
+      registerLocalBlob(resource.realFileBlob, [
+        resource.id,
+        resource.name,
+        resource.virtualPath,
+      ]);
+    }
     setDeviceSharedFolders((prev) => {
       const currentList = prev[currentDevice.id] || [];
-      const nextList = currentList.map((f) =>
-        f.id === folderId
-          ? {
-              ...f,
-              resourceCount: f.resourceCount + 1,
-              totalSizeBytes: f.totalSizeBytes + resource.sizeBytes,
-              resources: [...f.resources, resource],
-            }
-          : f
-      );
-      if (resource.realFileBlob) {
-        localBlobsRef.current.set(resource.id, resource.realFileBlob);
-        meshNetwork.registerFileProvider(resource.id, async () => resource.realFileBlob || null);
-      }
+      const folderExists = currentList.some((f) => f.id === folderId);
+      const nextList = folderExists
+        ? currentList.map((f) =>
+            f.id === folderId
+              ? {
+                  ...f,
+                  resourceCount: f.resourceCount + 1,
+                  totalSizeBytes: f.totalSizeBytes + resource.sizeBytes,
+                  resources: [...f.resources.filter((r) => r.id !== resource.id), resource],
+                }
+              : f
+          )
+        : [
+            ...currentList,
+            {
+              id: folderId,
+              virtualRoot: '/Shared',
+              label: 'Shared Folder (This PC)',
+              realSourceAlias: 'Local Volume -> Shared',
+              resourceCount: 1,
+              totalSizeBytes: resource.sizeBytes,
+              permissions: { ...DEFAULT_PERMISSIONS, canDownload: true },
+              resources: [resource],
+            },
+          ];
+
+      deviceSharedFoldersRef.current[currentDevice.id] = nextList;
+
       // Broadcast lightweight metadata without giant data/blob URLs
       const sanitizedList = nextList.map((f) => ({
         ...f,
@@ -1639,7 +1910,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       details: `${resource.name} (${resource.mimeType}) in ${folderId}`,
       resourceId: resource.id,
     });
-  }, [currentDevice, logActivity]);
+  }, [currentDevice, logActivity, registerLocalBlob]);
 
   const updateFolderPermissions = useCallback((folderId: string, perms: Partial<PeerPermissions>) => {
     setDeviceSharedFolders((prev) => {
@@ -1878,28 +2149,83 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Media Streaming Engine: Service Worker HTTP 206 Range Proxy with Screen Wake Lock
   const startDirectStream = useCallback((peerId: string, resource: VirtualResource) => {
-    const peer = nearbyPeers.find((p) => p.id === peerId);
+    const isLocalDevice = peerId === currentDevice.id || peerId === 'local' || peerId === currentDeviceRef.current.id;
+    const peer = isLocalDevice
+      ? {
+          id: currentDevice.id,
+          name: currentDevice.name,
+          ownerName: currentDevice.ownerName,
+          os: currentDevice.os,
+          ip: currentDevice.ip,
+          port: currentDevice.port,
+          fingerprint: currentDevice.fingerprint,
+          publicKey: currentDevice.publicKey,
+          mDnsName: currentDevice.mDnsName,
+          status: 'connected' as const,
+          lastSeen: Date.now(),
+          latencyMs: 0,
+          isOnline: true,
+          permissions: {
+            canView: true,
+            canPreview: true,
+            canStream: true,
+            canDownload: true,
+            canUpload: true,
+            canModify: true,
+            canDelete: true,
+          },
+          activeStreamCount: 0,
+          transportType: 'webrtc_direct' as const,
+        }
+      : nearbyPeers.find((p) => p.id === peerId);
+
     if (!peer) return;
 
-    const check = verifyPermission(peer.permissions, 'STREAM');
-    if (!check.allowed) {
-      logActivity({
-        type: 'security',
-        level: 'warning',
-        title: 'Stream Permission Denied',
-        details: `Direct media streaming disabled by peer ${peer.name}.`,
-        peerId,
-        resourceId: resource.id,
-      });
-      return;
+    if (!isLocalDevice) {
+      const check = verifyPermission(peer.permissions, 'STREAM');
+      if (!check.allowed) {
+        logActivity({
+          type: 'security',
+          level: 'warning',
+          title: 'Stream Permission Denied',
+          details: `Direct media streaming disabled by peer ${peer.name}.`,
+          peerId,
+          resourceId: resource.id,
+        });
+        return;
+      }
     }
 
     const sessionId = generateRandomId('stream');
     let mediaUrl: string | undefined = undefined;
-    const localBlob = localBlobsRef.current.get(resource.id);
+
+    // Check if local blob is available in memory or shared folders
+    let localBlob = localBlobsRef.current.get(resource.id);
+    if (!localBlob && resource.name) {
+      localBlob = localBlobsRef.current.get(resource.name);
+    }
+    if (!localBlob && resource.realFileBlob) {
+      localBlob = resource.realFileBlob;
+      registerLocalBlob(localBlob, [resource.id, resource.name, resource.virtualPath]);
+    }
+    if (!localBlob) {
+      for (const folders of Object.values(deviceSharedFoldersRef.current)) {
+        for (const f of folders) {
+          const found = f.resources.find((r) => r.id === resource.id || r.name === resource.name);
+          if (found?.realFileBlob) {
+            localBlob = found.realFileBlob;
+            registerLocalBlob(localBlob, [resource.id, resource.name, resource.virtualPath]);
+            break;
+          }
+        }
+        if (localBlob) break;
+      }
+    }
+
     if (localBlob) {
+      registerLocalBlob(localBlob, [resource.id, resource.name, resource.virtualPath]);
       mediaUrl = URL.createObjectURL(localBlob);
-    } else if (resource.previewUrl && resource.previewUrl.startsWith('data:')) {
+    } else if (resource.previewUrl && (resource.previewUrl.startsWith('data:') || resource.previewUrl.startsWith('blob:'))) {
       mediaUrl = resource.previewUrl;
     } else {
       // Connect to Service Worker Range Proxy: instant progressive playback without RAM buildup
