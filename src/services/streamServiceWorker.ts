@@ -54,9 +54,18 @@ class StreamServiceWorkerManager {
       this.isReady = true;
       return true;
     } catch (err) {
-      console.warn('[SW Manager] Service worker registration failed:', err);
-      this.isReady = false;
-      return false;
+      console.warn('[SW Manager] Service worker registration attempt 1 failed, retrying in 1s...', err);
+      try {
+        await new Promise((r) => setTimeout(r, 1000));
+        this.registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+        await navigator.serviceWorker.ready;
+        this.isReady = true;
+        return true;
+      } catch (retryErr) {
+        console.warn('[SW Manager] Service worker registration retry failed:', retryErr);
+        this.isReady = false;
+        return false;
+      }
     }
   }
 

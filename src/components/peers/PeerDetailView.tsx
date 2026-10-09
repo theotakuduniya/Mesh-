@@ -24,6 +24,7 @@ import {
 import { useMesh } from '../../context/MeshContext';
 import { VirtualResource } from '../../types/mesh';
 import { formatBytes } from '../../services/crypto';
+import { streamServiceWorker } from '../../services/streamServiceWorker';
 
 type SignalHealthLevel = 'green' | 'yellow' | 'red';
 
@@ -278,24 +279,28 @@ export const PeerDetailView: React.FC = () => {
     });
   }, [peer?.id, deviceSharedFolders, requestImagePreview, getPeerResources]);
 
-  // Automatically request image preview thumbnail from peer if missing when inspecting
+  // Automatically request preview from peer if missing when inspecting
   useEffect(() => {
     if (!previewResource || !peer) return;
-    const isImage = previewResource.type === 'image' || previewResource.mimeType.startsWith('image/');
-    if (isImage && !previewResource.previewUrl) {
+    if (!previewResource.previewUrl && !previewResource.textSnippet) {
       requestImagePreview(peer.id, previewResource.id);
     }
-  }, [previewResource?.id, previewResource?.previewUrl, peer?.id, requestImagePreview]);
+  }, [previewResource?.id, previewResource?.previewUrl, previewResource?.textSnippet, peer?.id, requestImagePreview]);
 
   // Keep previewResource synchronized when updated via PREVIEW_DATA
   useEffect(() => {
     if (!previewResource || !peer) return;
     const latestResources = getPeerResources(peer.id);
     const updated = latestResources.find((r) => r.id === previewResource.id);
-    if (updated && updated.previewUrl && updated.previewUrl !== previewResource.previewUrl) {
-      setPreviewResource(updated);
+    if (updated) {
+      if (
+        (updated.previewUrl && updated.previewUrl !== previewResource.previewUrl) ||
+        (updated.textSnippet && updated.textSnippet !== previewResource.textSnippet)
+      ) {
+        setPreviewResource(updated);
+      }
     }
-  }, [deviceSharedFolders, nearbyPeers, previewResource?.id, previewResource?.previewUrl, peer, getPeerResources]);
+  }, [deviceSharedFolders, nearbyPeers, previewResource?.id, previewResource?.previewUrl, previewResource?.textSnippet, peer, getPeerResources]);
 
   const handleBoostP2P = async () => {
     if (!peer || isBoosting) return;
@@ -875,34 +880,58 @@ export const PeerDetailView: React.FC = () => {
               </button>
             </div>
 
-            {/* Video / Streamable Media Stage */}
+            {/* Video / Streamable Media Stage: Direct Player & Theater option */}
             {(previewResource.type === 'video' || previewResource.mimeType.startsWith('video/')) && (
-              <div className="rounded-xl overflow-hidden bg-gradient-to-br from-purple-950/40 to-black border border-purple-500/20 p-6 flex flex-col items-center justify-center text-center space-y-3">
-                <div className="w-14 h-14 rounded-2xl bg-purple-900/40 border border-purple-500/40 flex items-center justify-center text-purple-400 shadow-lg">
-                  <Video className="w-7 h-7" />
+              <div className="rounded-xl overflow-hidden bg-black border border-purple-500/30 flex flex-col items-center justify-center relative shadow-xl">
+                <video
+                  src={streamServiceWorker.getVirtualStreamUrl(peer.id, previewResource.id, previewResource.name)}
+                  controls
+                  autoPlay
+                  playsInline
+                  className="w-full max-h-[46vh] sm:max-h-[50vh] object-contain bg-black"
+                />
+                <div className="w-full bg-zinc-950/90 px-3 py-2 flex items-center justify-between text-[11px] font-mono text-zinc-400 border-t border-white/[0.06]">
+                  <span className="flex items-center gap-1.5 text-purple-300">
+                    <Radio className="w-3 h-3 text-purple-400 animate-pulse" />
+                    P2P Video Stream · HTTP 206 Range Proxy
+                  </span>
+                  <button
+                    onClick={() => {
+                      startDirectStream(peer.id, previewResource);
+                      setPreviewResource(null);
+                    }}
+                    className="text-purple-400 hover:text-purple-200 underline font-medium cursor-pointer"
+                  >
+                    Theater Mode
+                  </button>
                 </div>
-                <div className="space-y-1">
-                  <div className="text-sm font-semibold text-white">Stream Video Over Direct WebRTC</div>
-                  <div className="text-xs text-zinc-400 font-mono">
-                    Direct P2P LAN playback · {formatBytes(previewResource.sizeBytes)} · {peer.name}
-                  </div>
-                </div>
-                <button
-                  onClick={() => {
-                    startDirectStream(peer.id, previewResource);
-                    setPreviewResource(null);
-                  }}
-                  className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs transition-colors flex items-center gap-2 shadow-lg cursor-pointer"
-                >
-                  <Radio className="w-4 h-4 animate-pulse" />
-                  <span>Start Live P2P Stream</span>
-                </button>
               </div>
             )}
 
-            {/* Image Preview Stage (If image resource) */}
+            {/* Audio Media Stage: Direct Audio Player */}
+            {(previewResource.type === 'audio' || previewResource.mimeType.startsWith('audio/')) && (
+              <div className="rounded-xl overflow-hidden bg-gradient-to-br from-emerald-950/40 to-black border border-emerald-500/30 p-4 space-y-3 shadow-xl">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-emerald-900/40 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow shrink-0">
+                    <Music className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-semibold text-white truncate">{previewResource.name}</div>
+                    <div className="text-[10px] text-zinc-400 font-mono">P2P Audio Stream · Direct WebRTC</div>
+                  </div>
+                </div>
+                <audio
+                  src={streamServiceWorker.getVirtualStreamUrl(peer.id, previewResource.id, previewResource.name)}
+                  controls
+                  autoPlay
+                  className="w-full"
+                />
+              </div>
+            )}
+
+            {/* Image Preview Stage */}
             {(previewResource.type === 'image' || previewResource.mimeType.startsWith('image/')) && (
-              <div className="rounded-xl overflow-hidden bg-black/60 border border-white/10 flex items-center justify-center min-h-[180px] max-h-[50vh] sm:max-h-[55vh] p-2">
+              <div className="rounded-xl overflow-hidden bg-black/80 border border-white/10 flex items-center justify-center min-h-[190px] max-h-[50vh] sm:max-h-[54vh] p-2">
                 {previewResource.previewUrl ? (
                   <img
                     src={previewResource.previewUrl}
@@ -910,9 +939,39 @@ export const PeerDetailView: React.FC = () => {
                     className="max-h-[48vh] sm:max-h-[52vh] w-auto max-w-full object-contain mx-auto rounded-lg shadow-xl"
                   />
                 ) : (
-                  <div className="text-center p-6 space-y-2">
+                  <div className="text-center p-6 space-y-3">
                     <RefreshCw className="w-5 h-5 text-blue-400 animate-spin mx-auto" />
-                    <div className="text-xs text-zinc-400 font-mono">Loading image preview from {peer.name}...</div>
+                    <div className="text-xs text-zinc-300 font-medium">Fetching image preview from {peer.name}...</div>
+                    <p className="text-[11px] text-zinc-500 font-mono">Requesting thumbnail slice over direct WebRTC</p>
+                    <button
+                      onClick={() => requestImagePreview(peer.id, previewResource.id)}
+                      className="px-3 py-1 text-xs text-blue-300 hover:text-white bg-blue-950/60 hover:bg-blue-900/60 border border-blue-500/30 rounded-lg transition-colors cursor-pointer"
+                    >
+                      Retry Loading
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Code / Text / Document Preview Stage */}
+            {(previewResource.type === 'code' || previewResource.type === 'document' || previewResource.mimeType.startsWith('text/')) && (
+              <div className="rounded-xl overflow-hidden bg-[#0c0d12] border border-white/10 p-3 max-h-[44vh] overflow-y-auto font-mono text-xs text-zinc-200">
+                {previewResource.textSnippet ? (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[10px] text-zinc-500 border-b border-white/5 pb-1">
+                      <span>PREVIEW SNIPPET (First 16 KB)</span>
+                      <span>UTF-8</span>
+                    </div>
+                    <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-zinc-300">
+                      {previewResource.textSnippet}
+                    </pre>
+                  </div>
+                ) : (
+                  <div className="text-center py-6 space-y-2">
+                    <FileText className="w-7 h-7 text-blue-400 mx-auto opacity-70" />
+                    <div className="text-xs text-zinc-300 font-medium">Document / Code File</div>
+                    <p className="text-[11px] text-zinc-500">Download file below to inspect full contents</p>
                   </div>
                 )}
               </div>

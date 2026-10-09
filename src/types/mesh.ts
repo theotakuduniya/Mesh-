@@ -66,6 +66,7 @@ export interface VirtualResource {
   isPreviewable: boolean;
   durationSeconds?: number;
   previewUrl?: string; // progressive or data URL
+  textSnippet?: string; // first lines / snippet for text/code/document preview
   realFileBlob?: File | Blob;
   isRealLocalFile?: boolean;
   summary?: string;

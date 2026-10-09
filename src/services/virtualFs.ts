@@ -68,36 +68,72 @@ export function sanitizeFoldersForWire(folders: SharedFolder[]): SharedFolder[] 
 }
 
 /**
- * Creates a lightweight JPEG thumbnail (max 320px) under 25KB for fast P2P preview
+ * Creates a lightweight JPEG thumbnail (max 320px) under 35KB for fast P2P preview
  */
-export async function generateImageThumbnail(file: Blob): Promise<string> {
+export async function generateImageThumbnail(file: Blob, fileName?: string): Promise<string> {
   if (typeof window === 'undefined') return '';
-  
-  // Fast path for small images under 120KB: direct data URL
-  if (file.size <= 120 * 1024 && (file.type.startsWith('image/') || file.type === '')) {
-    try {
-      const dataUrl = await new Promise<string>((resolve) => {
+
+  // Determine mime type from file or filename extension
+  let mimeType = file.type;
+  if (!mimeType && fileName) {
+    if (fileName.match(/\.(jpg|jpeg)$/i)) mimeType = 'image/jpeg';
+    else if (fileName.match(/\.png$/i)) mimeType = 'image/png';
+    else if (fileName.match(/\.webp$/i)) mimeType = 'image/webp';
+    else if (fileName.match(/\.gif$/i)) mimeType = 'image/gif';
+    else if (fileName.match(/\.svg$/i)) mimeType = 'image/svg+xml';
+    else if (fileName.match(/\.bmp$/i)) mimeType = 'image/bmp';
+  }
+  if (!mimeType) mimeType = 'image/jpeg';
+
+  const readFullAsDataUrl = (blob: Blob): Promise<string> => {
+    return new Promise((resolve) => {
+      try {
         const reader = new FileReader();
         reader.onload = () => resolve((reader.result as string) || '');
         reader.onerror = () => resolve('');
-        reader.readAsDataURL(file);
-      });
-      if (dataUrl) return dataUrl;
-    } catch {}
+        reader.readAsDataURL(blob);
+      } catch {
+        resolve('');
+      }
+    });
+  };
+
+  // Fast path for small images under 300KB or SVG / GIF formats
+  if (file.size <= 300 * 1024 || mimeType === 'image/svg+xml' || mimeType === 'image/gif') {
+    const dataUrl = await readFullAsDataUrl(file);
+    if (dataUrl) return dataUrl;
   }
 
-  // Canvas downscaling to ~320px JPEG
-  return new Promise((resolve) => {
+  // Canvas downscaling to ~320px JPEG with 2.5s timeout protection
+  return new Promise<string>((resolve) => {
+    let resolved = false;
+    const safeResolve = (val: string) => {
+      if (!resolved) {
+        resolved = true;
+        resolve(val);
+      }
+    };
+
+    // Timeout fallback to direct data URL if Image/Canvas hangs
+    const timer = setTimeout(async () => {
+      const fallback = await readFullAsDataUrl(file);
+      safeResolve(fallback);
+    }, 2500);
+
     try {
+      const typedBlob = file.type ? file : new Blob([file], { type: mimeType });
+      const url = URL.createObjectURL(typedBlob);
       const img = new Image();
-      const url = URL.createObjectURL(file);
+
       img.onload = () => {
+        clearTimeout(timer);
         try {
           URL.revokeObjectURL(url);
           const canvas = document.createElement('canvas');
           const maxDim = 320;
-          let width = img.width || 320;
-          let height = img.height || 240;
+          let width = img.naturalWidth || img.width || 320;
+          let height = img.naturalHeight || img.height || 240;
+
           if (width > height) {
             if (width > maxDim) {
               height = Math.round((height * maxDim) / width);
@@ -109,34 +145,32 @@ export async function generateImageThumbnail(file: Blob): Promise<string> {
               height = maxDim;
             }
           }
+
           canvas.width = Math.max(1, width);
           canvas.height = Math.max(1, height);
           const ctx = canvas.getContext('2d');
           if (ctx) {
             ctx.drawImage(img, 0, 0, width, height);
-            resolve(canvas.toDataURL('image/jpeg', 0.72));
+            const thumb = canvas.toDataURL('image/jpeg', 0.75);
+            safeResolve(thumb);
           } else {
-            resolve('');
+            readFullAsDataUrl(file).then(safeResolve);
           }
         } catch {
-          resolve('');
+          readFullAsDataUrl(file).then(safeResolve);
         }
       };
+
       img.onerror = () => {
+        clearTimeout(timer);
         URL.revokeObjectURL(url);
-        // Fallback: read slice as data URL
-        try {
-          const reader = new FileReader();
-          reader.onload = () => resolve((reader.result as string) || '');
-          reader.onerror = () => resolve('');
-          reader.readAsDataURL(file.slice(0, 100000));
-        } catch {
-          resolve('');
-        }
+        readFullAsDataUrl(file).then(safeResolve);
       };
+
       img.src = url;
     } catch {
-      resolve('');
+      clearTimeout(timer);
+      readFullAsDataUrl(file).then(safeResolve);
     }
   });
 }

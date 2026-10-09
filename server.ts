@@ -9,7 +9,146 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = process.env.PORT || 3000;
-const isProd = process.env.NODE_ENV === 'production' || fs.existsSync(path.resolve(__dirname, 'dist'));
+// Dist bundle is when running the compiled dist/server.js file directly
+const isRunningFromDist = __dirname.endsWith('dist') || __filename.includes('/dist/') || __filename.endsWith('/dist/server.js');
+const isProd = process.env.NODE_ENV === 'production' || isRunningFromDist;
+
+const FALLBACK_SW_CODE = `
+const SW_VERSION = 'v1.1.0';
+const VIRTUAL_STREAM_PREFIX = '/virtual-stream/';
+
+self.addEventListener('install', (event) => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(self.clients.claim());
+});
+
+const channel = typeof BroadcastChannel !== 'undefined'
+  ? new BroadcastChannel('mesh-virtual-stream-channel')
+  : null;
+
+const pendingRequests = new Map();
+
+if (channel) {
+  channel.onmessage = (event) => {
+    const data = event.data;
+    if (!data || !data.requestId) return;
+
+    if (data.type === 'RANGE_RESPONSE') {
+      const pending = pendingRequests.get(data.requestId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        pendingRequests.delete(data.requestId);
+        pending.resolve(data);
+      }
+    } else if (data.type === 'RANGE_ERROR') {
+      const pending = pendingRequests.get(data.requestId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        pendingRequests.delete(data.requestId);
+        pending.reject(new Error(data.error || 'Range fetch error'));
+      }
+    }
+  };
+}
+
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  if (url.pathname.startsWith(VIRTUAL_STREAM_PREFIX)) {
+    event.respondWith(handleVirtualStreamRangeRequest(event));
+  }
+});
+
+async function handleVirtualStreamRangeRequest(event) {
+  const request = event.request;
+  const url = new URL(request.url);
+  const parts = url.pathname.slice(VIRTUAL_STREAM_PREFIX.length).split('/');
+  const peerId = decodeURIComponent(parts[0] || '');
+  const resourceId = decodeURIComponent(parts[1] || '');
+  const filename = decodeURIComponent(parts.slice(2).join('/') || 'media.mp4');
+
+  const rangeHeader = request.headers.get('range');
+  let start = 0;
+  let end = null;
+
+  if (rangeHeader && rangeHeader.startsWith('bytes=')) {
+    const rangeParts = rangeHeader.replace('bytes=', '').split('-');
+    start = parseInt(rangeParts[0], 10) || 0;
+    if (rangeParts[1]) {
+      end = parseInt(rangeParts[1], 10);
+    }
+  }
+
+  const requestId = 'req_' + Math.random().toString(36).slice(2) + '_' + Date.now();
+
+  try {
+    const responseData = await requestRangeFromClient({
+      requestId,
+      peerId,
+      resourceId,
+      filename,
+      start,
+      end,
+      rangeHeader,
+    }, event.clientId);
+
+    const chunkBuffer = responseData.buffer;
+    const totalSize = responseData.totalSize || chunkBuffer.byteLength;
+    const mimeType = responseData.mimeType || 'video/mp4';
+    const actualStart = responseData.start !== undefined ? responseData.start : start;
+    const actualEnd = responseData.end !== undefined
+      ? responseData.end
+      : actualStart + chunkBuffer.byteLength - 1;
+
+    const headers = new Headers();
+    headers.set('Content-Type', mimeType);
+    headers.set('Accept-Ranges', 'bytes');
+    headers.set('Content-Range', \`bytes \${actualStart}-\${actualEnd}/\${totalSize}\`);
+    headers.set('Content-Length', String(chunkBuffer.byteLength));
+    headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    return new Response(chunkBuffer, {
+      status: 206,
+      statusText: 'Partial Content',
+      headers,
+    });
+  } catch (err) {
+    console.warn('[SW Stream Proxy] Range fetch failed:', err);
+    return new Response('P2P Range stream unavailable', { status: 503 });
+  }
+}
+
+function requestRangeFromClient(requestPayload, clientId) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRequests.delete(requestPayload.requestId);
+      reject(new Error('P2P Range request timeout after 12s'));
+    }, 12000);
+
+    pendingRequests.set(requestPayload.requestId, { resolve, reject, timer });
+
+    if (channel) {
+      channel.postMessage({
+        type: 'RANGE_REQUEST',
+        ...requestPayload,
+      });
+    }
+
+    if (clientId && self.clients) {
+      self.clients.get(clientId).then((client) => {
+        if (client) {
+          client.postMessage({
+            type: 'RANGE_REQUEST',
+            ...requestPayload,
+          });
+        }
+      }).catch(() => {});
+    }
+  });
+}
+`;
 
 async function startServer() {
   const app = express();
@@ -367,31 +506,45 @@ async function startServer() {
     res.json({ peers: activeList });
   });
 
-  // Explicit service worker endpoint with Service-Worker-Allowed header
+  // Explicit service worker endpoint with Service-Worker-Allowed header & multi-location fallback
   app.get('/sw.js', (_req, res) => {
-    const swPath = path.resolve(__dirname, 'public/sw.js');
-    if (fs.existsSync(swPath)) {
-      res.setHeader('Content-Type', 'application/javascript');
-      res.setHeader('Service-Worker-Allowed', '/');
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const candidatePaths = [
+      path.resolve(__dirname, 'sw.js'), // When executing dist/server.js in production
+      path.resolve(__dirname, 'public/sw.js'), // When executing server.ts in local dev
+      path.resolve(process.cwd(), 'dist/sw.js'), // Project root dist
+      path.resolve(process.cwd(), 'public/sw.js'), // Project root public
+      path.resolve(__dirname, '../public/sw.js'), // Parent public if in dist
+    ];
+
+    const swPath = candidatePaths.find((p) => fs.existsSync(p));
+
+    res.setHeader('Content-Type', 'application/javascript; charset=UTF-8');
+    res.setHeader('Service-Worker-Allowed', '/');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    if (swPath) {
       res.sendFile(swPath);
     } else {
-      res.status(404).send('Not found');
+      res.send(FALLBACK_SW_CODE);
     }
   });
 
   // Static files & SPA mounting
-  const distDir = fs.existsSync(path.resolve(__dirname, 'dist'))
-    ? path.resolve(__dirname, 'dist')
-    : fs.existsSync(path.resolve(__dirname, 'index.html'))
-    ? __dirname
-    : null;
+  let distDir: string | null = null;
+  if (isRunningFromDist && fs.existsSync(path.resolve(__dirname, 'index.html')) && fs.existsSync(path.resolve(__dirname, 'assets'))) {
+    // When executing dist/server.js directly in production
+    distDir = __dirname;
+  } else if (fs.existsSync(path.resolve(__dirname, 'dist', 'index.html')) && fs.existsSync(path.resolve(__dirname, 'dist', 'assets'))) {
+    distDir = path.resolve(__dirname, 'dist');
+  } else if (fs.existsSync(path.resolve(process.cwd(), 'dist', 'index.html')) && fs.existsSync(path.resolve(process.cwd(), 'dist', 'assets'))) {
+    distDir = path.resolve(process.cwd(), 'dist');
+  }
 
-  if (distDir && (isProd || process.env.NODE_ENV === 'production')) {
+  if (isProd && distDir) {
     console.log(`[Server] Running in Production mode: serving ${distDir}`);
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(distDir, 'index.html'));
+      res.sendFile(path.resolve(distDir!, 'index.html'));
     });
   } else {
     console.log('[Server] Running in Development mode: mounting Vite middleware');
@@ -401,6 +554,23 @@ async function startServer() {
       appType: 'spa',
     });
     app.use(vite.middlewares);
+
+    // Fallback for SPA routing in development to guarantee Vite index.html transformation
+    app.use('*', async (req, res, next) => {
+      const url = req.originalUrl;
+      if (url.startsWith('/api') || url.startsWith('/virtual-stream') || url === '/sw.js') {
+        return next();
+      }
+      try {
+        const indexPath = path.resolve(process.cwd(), 'index.html');
+        let template = fs.readFileSync(indexPath, 'utf-8');
+        template = await vite.transformIndexHtml(url, template);
+        res.status(200).set({ 'Content-Type': 'text/html; charset=utf-8' }).end(template);
+      } catch (e) {
+        vite.ssrFixStacktrace(e as Error);
+        next(e);
+      }
+    });
   }
 
   server.listen(Number(PORT), '0.0.0.0', () => {

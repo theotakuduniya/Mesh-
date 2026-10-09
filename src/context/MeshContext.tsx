@@ -1142,17 +1142,19 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
           break;
         }
 
-        // On-Demand Image Preview Inspection for Remote Peers (Phones / Laptops)
+        // On-Demand Media / Image / Text Preview Inspection for Remote Peers
         case 'PREVIEW_REQUEST': {
           if (packet.targetId === myDevice.id) {
             const { resourceId } = packet.payload;
             let blob = localBlobsRef.current.get(resourceId);
+            let targetRes: VirtualResource | undefined;
             let existingPreviewUrl: string | undefined;
 
             for (const folders of Object.values(deviceSharedFoldersRef.current)) {
               for (const f of folders) {
                 const found = f.resources.find((r) => r.id === resourceId);
                 if (found) {
+                  targetRes = found;
                   if (found.previewUrl && found.previewUrl.startsWith('data:image/')) {
                     existingPreviewUrl = found.previewUrl;
                   }
@@ -1162,7 +1164,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   break;
                 }
               }
-              if (existingPreviewUrl || blob) break;
+              if (targetRes) break;
             }
 
             if (existingPreviewUrl) {
@@ -1175,23 +1177,66 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
 
             if (blob) {
-              generateImageThumbnail(blob).then((thumbnailUrl) => {
-                if (thumbnailUrl) {
+              const isImage =
+                targetRes?.type === 'image' ||
+                blob.type.startsWith('image/') ||
+                Boolean(targetRes?.name && targetRes.name.match(/\.(jpg|jpeg|png|webp|gif|svg|bmp)$/i));
+              const isText =
+                targetRes?.type === 'code' ||
+                targetRes?.type === 'document' ||
+                blob.type.startsWith('text/') ||
+                Boolean(targetRes?.name && targetRes.name.match(/\.(txt|md|json|ts|js|py|html|css|log|csv|xml|yaml|yml)$/i));
+
+              if (isImage) {
+                generateImageThumbnail(blob, targetRes?.name).then((thumbnailUrl) => {
                   const respPkt = meshNetwork.createPacket('PREVIEW_DATA', myDevice, packet.senderId, {
                     resourceId,
-                    previewUrl: thumbnailUrl,
+                    previewUrl: thumbnailUrl || '',
                   });
                   meshNetwork.sendPacket(respPkt);
-                }
+                });
+              } else if (isText) {
+                // Read first 16KB text snippet for code/document preview
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const text = (reader.result as string) || '';
+                  const respPkt = meshNetwork.createPacket('PREVIEW_DATA', myDevice, packet.senderId, {
+                    resourceId,
+                    textSnippet: text,
+                  });
+                  meshNetwork.sendPacket(respPkt);
+                };
+                reader.onerror = () => {
+                  const respPkt = meshNetwork.createPacket('PREVIEW_DATA', myDevice, packet.senderId, {
+                    resourceId,
+                    textSnippet: '',
+                  });
+                  meshNetwork.sendPacket(respPkt);
+                };
+                reader.readAsText(blob.slice(0, 16384));
+              } else {
+                const respPkt = meshNetwork.createPacket('PREVIEW_DATA', myDevice, packet.senderId, {
+                  resourceId,
+                  previewUrl: '',
+                });
+                meshNetwork.sendPacket(respPkt);
+              }
+            } else {
+              // Resource blob not found locally
+              const respPkt = meshNetwork.createPacket('PREVIEW_DATA', myDevice, packet.senderId, {
+                resourceId,
+                previewUrl: '',
+                error: 'File not currently held in host memory',
               });
+              meshNetwork.sendPacket(respPkt);
             }
           }
           break;
         }
 
         case 'PREVIEW_DATA': {
-          if (packet.targetId === myDevice.id && packet.payload?.previewUrl) {
-            const { resourceId, previewUrl } = packet.payload;
+          if (packet.targetId === myDevice.id && packet.payload) {
+            const { resourceId, previewUrl, textSnippet } = packet.payload;
             setDeviceSharedFolders((prev) => {
               const updated = { ...prev };
               let changed = false;
@@ -1201,7 +1246,11 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   resources: f.resources.map((r) => {
                     if (r.id === resourceId) {
                       changed = true;
-                      return { ...r, previewUrl };
+                      return {
+                        ...r,
+                        previewUrl: previewUrl || r.previewUrl,
+                        textSnippet: textSnippet || r.textSnippet,
+                      };
                     }
                     return r;
                   }),

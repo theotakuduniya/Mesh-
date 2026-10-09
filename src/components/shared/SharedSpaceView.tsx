@@ -201,7 +201,14 @@ export const SharedSpaceView: React.FC = () => {
       totalBytes += file.size;
       const type = getResourceType(file.type, file.name);
       const isStreamable = type === 'video' || type === 'audio';
-      const previewUrl = URL.createObjectURL(file);
+      let previewUrl: string | undefined = undefined;
+      if (type === 'image') {
+        previewUrl = await generateImageThumbnail(file, file.name);
+      } else if (file.size <= 100 * 1024) {
+        previewUrl = await readFileAsDataUrl(file);
+      } else {
+        previewUrl = URL.createObjectURL(file);
+      }
 
       resources.push({
         id: generateRandomId('res_dir'),
